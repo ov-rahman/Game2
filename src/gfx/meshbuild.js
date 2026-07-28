@@ -360,10 +360,14 @@ export function buildLevelMesh(dungeon, floorDef) {
     const def = STYLES[name] || STYLES.brick;
     const t = def.tint;
     const tinted = (c) => [c[0] * t[0], c[1] * t[1], c[2] * t[2]];
+    const slot = (name, fallback) => tileUV(TILE[name] == null ? fallback : TILE[name]);
     st = {
-      wall: tileUV(TILE[def.wall] == null ? TILE.WALL : TILE[def.wall]),
-      floor: tileUV(TILE[def.floor] == null ? TILE.FLOOR : TILE[def.floor]),
-      ceil: tileUV(TILE[def.ceiling] == null ? TILE.CEILING : TILE[def.ceiling]),
+      wall: slot(def.wall, TILE.WALL),
+      floor: slot(def.floor, TILE.FLOOR),
+      ceil: slot(def.ceiling, TILE.CEILING),
+      // Eight entries so a three-bit hash indexes it without a modulo.
+      mix: (def.mix || [def.floor, def.floor, def.floor, def.floor, def.floor, def.floor, def.floor, def.floor])
+        .map((n) => slot(n, TILE.FLOOR)),
       wallTint: tinted(pal.wall),
       floorTint: tinted(pal.floor),
       ceilTint: tinted(pal.ceiling),
@@ -516,9 +520,11 @@ export function buildLevelMesh(dungeon, floorDef) {
               const u1 = (sx + 1) / N;
               const v0 = sy / N;
               const v1 = (sy + 1) / N;
-              // A fresh flip per sub-quad. This is what stops the tiling from
-              // drawing the lattice back on top of the geometry.
-              const sub = uvVariant(uv, (hash ^ (sx * 0x9e37) ^ (sy * 0x85eb)) >>> 0);
+              // A fresh tile *and* a fresh flip per sub-quad. Between them the
+              // eye stops finding the four-unit lattice the cells are on.
+              const sh = (hash ^ (sx * 0x9e3779b1) ^ (sy * 0x85ebca6b)) >>> 0;
+              const picked = isHazard || isStairs ? uv : style.mix[(sh >>> 5) & 7];
+              const sub = uvVariant(picked, sh);
               target.quadAuto(
                 [ax, groundAt(terrain, ax, az) - drop, az],
                 [bx, groundAt(terrain, bx, az) - drop, az],
@@ -1107,6 +1113,55 @@ function drawProp(base, glow, pr, seed, uvFor, uvs) {
           pr.color || pal.hazard,
           a + lean,
           0.95,
+        );
+      }
+      break;
+    }
+
+    case 'log':
+      // Squared rather than round: at this size a six-sided cylinder and a box
+      // are the same three pixels, and the box is a sixth of the geometry.
+      base.slab(
+        pr.x, pr.y, pr.z,
+        pr.len, pr.r * 2, pr.r * 2,
+        pr.yaw, 0.08,
+        pr.stone ? uvFor.rock : uvFor.beam,
+        pr.stone ? pal.rubble : pal.trim,
+        0.86,
+      );
+      break;
+
+    case 'crate':
+      base.slab(pr.x, pr.y + pr.s / 2, pr.z, pr.s, pr.s, pr.s * 0.9, pr.yaw, 0, uvFor.beam, pal.trim, 0.88);
+      base.slab(pr.x, pr.y + pr.s * 0.98, pr.z, pr.s * 1.06, pr.s * 0.12, pr.s * 0.96, pr.yaw, 0, uvFor.beam, pal.rubble, 0.92);
+      break;
+
+    case 'embers':
+      // Cold ash with a couple of coals still in it. Low and wide so it reads
+      // from standing height as a fire that has gone out.
+      base.chunk(pr.x, pr.y - 0.04, pr.z, pr.r, 0.1, 6, seed, uvFor.rock, pal.rubble, seed, 0.7);
+      glow.chunk(pr.x, pr.y - 0.02, pr.z, pr.r * 0.55, 0.14, 5, seed * 0.7, uvs.glow, pr.color, seed, 1);
+      break;
+
+    case 'wallStub': {
+      // A wall that fell over: the course still standing, and the stones that
+      // came off the top of it lying along its length.
+      base.slab(pr.x, pr.y + pr.h / 2, pr.z, pr.len, pr.h, pr.thick, pr.yaw, 0, uvs.wall, pal.wall, 0.8);
+      const n = 3;
+      for (let i = 0; i < n; i++) {
+        const t = (i + 0.5) / n - 0.5;
+        base.chunk(
+          pr.x + Math.cos(pr.yaw) * pr.len * t,
+          pr.y + pr.h - 0.05,
+          pr.z + Math.sin(pr.yaw) * pr.len * t,
+          pr.thick * 0.5,
+          0.22,
+          5,
+          pr.yaw + i,
+          uvFor.rock,
+          pal.rubble,
+          seed + i,
+          0.85,
         );
       }
       break;
