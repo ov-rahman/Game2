@@ -33,10 +33,11 @@ export const C = {
   STAIRS: 5,
   RUBBLE: 6, // breakable block
   PILLAR: 7, // freestanding rock column: blocks like a wall, reads as terrain
+  LEDGE: 8,  // retaining wall you can see over: blocks, but only knee high
 };
 
 export function isOpen(cell) {
-  return cell !== C.SOLID && cell !== C.RUBBLE && cell !== C.PILLAR;
+  return cell !== C.SOLID && cell !== C.RUBBLE && cell !== C.PILLAR && cell !== C.LEDGE;
 }
 
 /** Teams for collision filtering. */

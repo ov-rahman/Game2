@@ -35,7 +35,27 @@ export const STYLES = {
   ruined: { wall: 'WALL_CRACKED', floor: 'FLOOR_COBBLE', ceiling: 'CEILING', tint: [0.9, 0.92, 0.9] },
   vaulted: { wall: 'WALL_RIB', floor: 'FLOOR_TILED', ceiling: 'CEIL_VAULT', tint: [1.06, 1.03, 0.98] },
   timber: { wall: 'WALL_ROUGH', floor: 'FLOOR_PLANK', ceiling: 'CEILING', tint: [1.0, 0.95, 0.88] },
+  // Not masonry at all: the style a room gets when nobody built it.
+  cavern: { wall: 'ROCK', floor: 'ROCK', ceiling: 'ROCK', tint: [0.92, 0.94, 0.92] },
 };
+
+/**
+ * What a cave is allowed to grow. Anything built — columns, beams, sconces,
+ * cairns — is filtered out of a natural room, because the whole reading of the
+ * space is that nobody has been here to build it.
+ */
+export const NATURAL_KINDS = new Set([
+  'rock',
+  'rockPile',
+  'stalagmite',
+  'stalactite',
+  'mushroom',
+  'crystal',
+  'mound',
+  'roots',
+  'grass',
+  'stream',
+]);
 
 /** Fallback used when a floor names nothing. */
 const DEFAULT_SCATTER = [

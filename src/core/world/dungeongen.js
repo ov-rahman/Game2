@@ -8,6 +8,7 @@
  */
 import { GRID_W, GRID_H, CELL, C, isOpen } from '../constants.js';
 import { buildTerrain, groundAt } from './terrain.js';
+import { buildContour } from './contour.js';
 import { decorFor } from '../../data/decor.js';
 
 export const ROOM_KIND = {
@@ -171,6 +172,55 @@ export function generateDungeon(rng, floorDef) {
     r.style = styles[pick];
   }
 
+  // ---- elevation and floor plan ----------------------------------------
+  // Every room sits at its own height, and some rooms are not one flat height
+  // at all. `elev` pins a per-cell floor level that the terrain builder seeds
+  // from, which is how a room can hold a gallery above a sunken hall.
+  const elev = new Float32Array(GRID_W * GRID_H);
+  const elevSet = new Uint8Array(GRID_W * GRID_H);
+  const headroom = new Float32Array(GRID_W * GRID_H);
+  const relief = floorDef.relief == null ? 0.5 : floorDef.relief;
+
+  for (const r of rooms) {
+    // The start room stays at zero so the player never spawns on a slope.
+    r.elev = r.id === 0 ? 0 : rng.range(-1, 1) * relief * 4.2;
+    r.head = rng.range(-0.35, 1.0) * relief * 2.2;
+    r.plan = 'hall';
+    for (let y = r.y; y < r.y + r.h; y++) {
+      for (let x = r.x; x < r.x + r.w; x++) {
+        const i = idx(x, y);
+        elev[i] = r.elev;
+        headroom[i] = r.head;
+        elevSet[i] = 1;
+      }
+    }
+  }
+
+  // Which rooms get a shape other than "rectangle". Start, shop and boss rooms
+  // stay simple: they are where the player spawns, buys and fights, and none of
+  // those readings survive a floor you have to navigate.
+  for (const r of rooms) {
+    if (r.kind === ROOM_KIND.START || r.kind === ROOM_KIND.SHOP || r.kind === ROOM_KIND.BOSS) continue;
+    const plans = [];
+    if (r.w >= 9 && r.h >= 9) plans.push('sunken');
+    if (Math.max(r.w, r.h) >= 9 && Math.min(r.w, r.h) >= 6) plans.push('terrace');
+    if (Math.max(r.w, r.h) >= 8 && Math.min(r.w, r.h) >= 5) plans.push('chasm');
+    if (r.w >= 6 && r.h >= 6) plans.push('cave', 'cave');
+    if (!plans.length) continue;
+    if (!rng.chance(0.72)) continue;
+    const plan = rng.pick(plans);
+    r.plan = plan;
+    r.snapshot = snapshotRoom(cells, elev, headroom, r);
+    if (plan === 'cave') {
+      carveCave(cells, rng, r, headroom, relief);
+      r.style = 'cavern';
+    }
+    else if (plan === 'sunken') carveSunken(cells, rng, r, elev, relief);
+    else if (plan === 'terrace') carveTerrace(cells, rng, r, elev, relief);
+    else if (plan === 'chasm') carveChasm(cells, rng, r);
+  }
+
+
   // ---- decorate --------------------------------------------------------
   for (const r of rooms) {
     if (r.kind === ROOM_KIND.START || r.kind === ROOM_KIND.SHOP) continue;
@@ -217,7 +267,10 @@ export function generateDungeon(rng, floorDef) {
   }
 
   // Never block a room's own centre: it is where props and the player spawn.
+  // Shaped rooms keep whatever they carved there — a chasm with a hole punched
+  // through the middle of it is not a chasm.
   for (const r of rooms) {
+    if (r.plan !== 'hall') continue;
     for (let y = r.cy - 1; y <= r.cy + 1; y++) {
       for (let x = r.cx - 1; x <= r.cx + 1; x++) {
         if (inside(x, y)) cells[idx(x, y)] = C.FLOOR;
@@ -225,10 +278,49 @@ export function generateDungeon(rng, floorDef) {
     }
   }
 
+  // ---- connectivity repair ----------------------------------------------
+  // Run last, because everything before it can disconnect the level: a floor
+  // plan can pinch itself shut, and a pit pool dropped on a corridor mouth
+  // strands whatever was behind it. Both are cheaper to detect than to prevent.
+  //
+  // Two stages. First undo floor plans that broke things — a rectangle is
+  // always connected, so this always converges. Then, for anything still cut
+  // off (a pit across the only way in), dig a path to it. The result is a level
+  // that is walkable by construction rather than by argument.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const reach = floodFill(cells, rooms[0].cx, rooms[0].cy);
+    let repaired = false;
+    for (const r of rooms) {
+      if (r.plan === 'hall' || !r.snapshot) continue;
+      if (roomReach(cells, reach, r) >= 0.8) continue;
+      restoreRoom(cells, elev, headroom, r, r.snapshot);
+      if (r.plan === 'cave') r.style = r.snapshot.style;
+      r.plan = 'hall';
+      repaired = true;
+    }
+    if (!repaired) break;
+  }
+
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const reach = floodFill(cells, rooms[0].cx, rooms[0].cy);
+    let target = null;
+    for (const r of rooms) {
+      if (roomReach(cells, reach, r) >= 0.8) continue;
+      target = r;
+      break;
+    }
+    if (!target) break;
+    if (!digTo(cells, reach, target.cx, target.cy)) break;
+  }
+  for (const r of rooms) r.snapshot = null;
+
   // ---- doorways --------------------------------------------------------
   // A floor cell on a room boundary with exactly two open neighbours across is
   // a threshold: mark it so the mesh builder can frame it.
   for (const r of rooms) {
+    // A cave has no thresholds. Framing its mouth in dressed stone would say
+    // somebody built it, which is exactly the opposite of the point.
+    if (r.plan === 'cave') continue;
     markDoorways(cells, r);
   }
 
@@ -237,8 +329,15 @@ export function generateDungeon(rng, floorDef) {
   for (const r of rooms) {
     const n = r.kind === ROOM_KIND.BOSS ? 4 : Math.max(1, Math.round((r.w * r.h) / 26));
     for (let i = 0; i < n; i++) {
-      const lx = rng.int(r.x + 1, r.x + r.w - 2);
-      const ly = rng.int(r.y + 1, r.y + r.h - 2);
+      let lx = rng.int(r.x + 1, r.x + r.w - 2);
+      let ly = rng.int(r.y + 1, r.y + r.h - 2);
+      // Shaped rooms have rock inside them now; a lamp buried in a ledge lights
+      // nothing. Retry a few times before giving up on this one.
+      for (let t = 0; t < 8 && !isOpen(cells[idx(lx, ly)]); t++) {
+        lx = rng.int(r.x + 1, r.x + r.w - 2);
+        ly = rng.int(r.y + 1, r.y + r.h - 2);
+      }
+      if (!isOpen(cells[idx(lx, ly)])) continue;
       const hue = rng.pick(floorDef.lightColors);
       const light = {
         x: (lx + 0.5) * CELL,
@@ -292,6 +391,19 @@ export function generateDungeon(rng, floorDef) {
     active: false,
   };
 
+  // The stairs must be standable and reachable, whatever landed on that cell.
+  for (let y = stairs.gy - 1; y <= stairs.gy + 1; y++) {
+    for (let x = stairs.gx - 1; x <= stairs.gx + 1; x++) {
+      if (!inside(x, y)) continue;
+      const i = idx(x, y);
+      if (cells[i] === C.PIT || cells[i] === C.PILLAR || cells[i] === C.RUBBLE || cells[i] === C.LEDGE) cells[i] = C.FLOOR;
+    }
+  }
+  {
+    const reach = floodFill(cells, rooms[0].cx, rooms[0].cy);
+    if (!reach[idx(stairs.gx, stairs.gy)]) digTo(cells, reach, stairs.gx, stairs.gy);
+  }
+
   const start = rooms[0].world();
 
   const dungeon = {
@@ -309,6 +421,27 @@ export function generateDungeon(rng, floorDef) {
 
   // Relief last: it reads the finished grid, and everything that stands on the
   // ground needs it, so it has to exist before the first tick.
+  dungeon.elev = elev;
+  dungeon.elevSet = elevSet;
+  dungeon.headroom = headroom;
+
+  // Which cells belong to a cave. The renderer draws these from a smooth
+  // isoline instead of from grid faces, so the mark has to cover the rock
+  // around a cave as well as its floor — that rock is what the isoline runs
+  // through.
+  const natural = new Uint8Array(GRID_W * GRID_H);
+  for (const r of rooms) {
+    if (r.plan !== 'cave') continue;
+    for (let y = r.y - 1; y <= r.y + r.h; y++) {
+      for (let x = r.x - 1; x <= r.x + r.w; x++) {
+        if (!inside(x, y)) continue;
+        natural[idx(x, y)] = 1;
+      }
+    }
+  }
+  dungeon.natural = natural;
+  dungeon.contour = buildContour(cells, natural, rng.fork('contour'));
+
   dungeon.terrain = buildTerrain(rng.fork('terrain'), dungeon, floorDef);
 
   // Lift the fixtures onto the ground they actually sit on.
@@ -350,6 +483,365 @@ export function generateDungeon(rng, floorDef) {
 
 function inside(x, y) {
   return x >= 1 && y >= 1 && x < GRID_W - 1 && y < GRID_H - 1;
+}
+
+// ------------------------------------------------------------- floor plans
+
+function snapshotRoom(cells, elev, headroom, r) {
+  const n = r.w * r.h;
+  const snap = { cells: new Uint8Array(n), elev: new Float32Array(n), head: new Float32Array(n), style: r.style };
+  for (let y = 0; y < r.h; y++) {
+    for (let x = 0; x < r.w; x++) {
+      const gx = r.x + x;
+      const gy = r.y + y;
+      if (!inside(gx, gy)) continue;
+      const i = idx(gx, gy);
+      const k = y * r.w + x;
+      snap.cells[k] = cells[i];
+      snap.elev[k] = elev[i];
+      snap.head[k] = headroom[i];
+    }
+  }
+  return snap;
+}
+
+function restoreRoom(cells, elev, headroom, r, snap) {
+  for (let y = 0; y < r.h; y++) {
+    for (let x = 0; x < r.w; x++) {
+      const gx = r.x + x;
+      const gy = r.y + y;
+      if (!inside(gx, gy)) continue;
+      const i = idx(gx, gy);
+      const k = y * r.w + x;
+      cells[i] = snap.cells[k];
+      elev[i] = snap.elev[k];
+      headroom[i] = snap.head[k];
+    }
+  }
+}
+
+/** Fraction of a room's open cells that the flood fill reached. */
+function roomReach(cells, reach, r) {
+  let open = 0;
+  let hit = 0;
+  for (let y = r.y; y < r.y + r.h; y++) {
+    for (let x = r.x; x < r.x + r.w; x++) {
+      if (!inside(x, y)) continue;
+      const i = idx(x, y);
+      const c = cells[i];
+      if (c === C.SOLID || c === C.PIT || c === C.PILLAR || c === C.LEDGE) continue;
+      open++;
+      if (reach[i]) hit++;
+    }
+  }
+  return open === 0 ? 1 : hit / open;
+}
+
+/**
+ * Dig from (gx,gy) to the nearest already-reachable cell, opening whatever is
+ * in the way. The last resort that makes the level walkable no matter what the
+ * generators did to it.
+ */
+function digTo(cells, reach, gx, gy) {
+  const prev = new Int32Array(GRID_W * GRID_H).fill(-1);
+  const seen = new Uint8Array(GRID_W * GRID_H);
+  const queue = new Int32Array(GRID_W * GRID_H);
+  let head = 0;
+  let tail = 0;
+  const start = idx(gx, gy);
+  seen[start] = 1;
+  queue[tail++] = start;
+  let found = -1;
+  while (head < tail) {
+    const cur = queue[head++];
+    if (reach[cur]) { found = cur; break; }
+    const cx = cur % GRID_W;
+    const cy = (cur / GRID_W) | 0;
+    for (let k = 0; k < 4; k++) {
+      const nx = cx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ny = cy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (!inside(nx, ny)) continue;
+      const ni = idx(nx, ny);
+      if (seen[ni]) continue;
+      seen[ni] = 1;
+      prev[ni] = cur;
+      queue[tail++] = ni;
+    }
+  }
+  if (found < 0) return false;
+  let cur = found;
+  let guardD = 0;
+  while (cur >= 0 && guardD++ < 4096) {
+    const c = cells[cur];
+    if (c === C.SOLID || c === C.PIT || c === C.PILLAR || c === C.LEDGE) cells[cur] = C.FLOOR;
+    cur = prev[cur];
+  }
+  return true;
+}
+
+/** Cells reachable on foot from (gx,gy). */
+function floodFill(cells, gx, gy) {
+  const seen = new Uint8Array(GRID_W * GRID_H);
+  const queue = new Int32Array(GRID_W * GRID_H);
+  let head = 0;
+  let tail = 0;
+  const start = idx(gx, gy);
+  seen[start] = 1;
+  queue[tail++] = start;
+  while (head < tail) {
+    const cur = queue[head++];
+    const cx = cur % GRID_W;
+    const cy = (cur / GRID_W) | 0;
+    for (let k = 0; k < 4; k++) {
+      const nx = cx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ny = cy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= GRID_W || ny >= GRID_H) continue;
+      const ni = idx(nx, ny);
+      if (seen[ni]) continue;
+      const c = cells[ni];
+      // Rubble counts as passable: it is breakable, and a room behind one is
+      // a puzzle, not a dead end.
+      if (c === C.SOLID || c === C.PIT || c === C.PILLAR || c === C.LEDGE) continue;
+      seen[ni] = 1;
+      queue[tail++] = ni;
+    }
+  }
+  return seen;
+}
+
+/**
+ * Is this room-border cell a corridor mouth?
+ *
+ * Floor plans are carved after the corridors, so anything that seals a mouth
+ * strands the room. Every carver asks this before it puts rock, a pit or a
+ * retaining wall on the rim.
+ */
+function isMouth(cells, r, x, y) {
+  const onEdge = x === r.x || y === r.y || x === r.x + r.w - 1 || y === r.y + r.h - 1;
+  if (!onEdge) return false;
+  for (let k = 0; k < 4; k++) {
+    const nx = x + (k === 0 ? 1 : k === 1 ? -1 : 0);
+    const ny = y + (k === 2 ? 1 : k === 3 ? -1 : 0);
+    if (!inside(nx, ny)) continue;
+    if (nx >= r.x && nx < r.x + r.w && ny >= r.y && ny < r.y + r.h) continue;
+    if (isOpen(cells[idx(nx, ny)])) return true;
+  }
+  return false;
+}
+
+
+
+/**
+ * Cave: eat the rectangle back into something that was never built.
+ *
+ * A couple of smoothing passes over a noisy mask, then a guaranteed-open core
+ * so the room cannot close around itself. Corridors are carved after this and
+ * punch through whatever is left, so connectivity is never at risk.
+ */
+function carveCave(cells, rng, r, headroom, relief) {
+  const w = r.w;
+  const h = r.h;
+  let mask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      // Bias toward rock at the rim: that is what rounds the outline off.
+      const edge = Math.min(x, y, w - 1 - x, h - 1 - y);
+      const p = edge === 0 ? 0.82 : edge === 1 ? 0.42 : 0.3;
+      mask[y * w + x] = rng.chance(p) ? 1 : 0;
+    }
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    const next = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let n = 0;
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let ox = -1; ox <= 1; ox++) {
+            if (!ox && !oy) continue;
+            const nx = x + ox;
+            const ny = y + oy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) { n++; continue; }
+            n += mask[ny * w + nx];
+          }
+        }
+        next[y * w + x] = n >= 5 ? 1 : 0;
+      }
+    }
+    mask = next;
+  }
+  // Keep a blob around the centre open no matter what the automaton decided.
+  const cxr = w >> 1;
+  const cyr = h >> 1;
+  const core = Math.max(2, Math.round(Math.min(w, h) * 0.3));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (Math.abs(x - cxr) + Math.abs(y - cyr) <= core) mask[y * w + x] = 0;
+    }
+  }
+
+  // Every corridor mouth gets a passage to that core, dug before the mask is
+  // committed. Without this the automaton walls the room's own entrances up.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const gx = r.x + x;
+      const gy = r.y + y;
+      if (!inside(gx, gy)) continue;
+      if (!isMouth(cells, r, gx, gy)) continue;
+      let px = x;
+      let py = y;
+      let guardC = 0;
+      while ((px !== cxr || py !== cyr) && guardC++ < 64) {
+        mask[py * w + px] = 0;
+        if (px !== cxr) px += Math.sign(cxr - px);
+        else py += Math.sign(cyr - py);
+      }
+    }
+  }
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const gx = r.x + x;
+      const gy = r.y + y;
+      if (!inside(gx, gy)) continue;
+      const i = idx(gx, gy);
+      if (mask[y * w + x]) cells[i] = C.SOLID;
+      else headroom[i] = relief * 2.4; // caves are tall
+    }
+  }
+}
+
+/**
+ * Sunken hall: a gallery you arrive on, a drop, and a floor below it.
+ *
+ * The ledge between the two is solid rock one cell thick, which is what lets
+ * the height field hold a real cliff there instead of ramping across it. One
+ * gap in the ledge, and a ramp inside the hall climbing to meet it, is the only
+ * way down — so the room is genuinely two levels of the same place.
+ */
+function carveSunken(cells, rng, r, elev, relief) {
+  const drop = 2.2 + relief * 1.6;
+  const hall = r.elev - drop;
+
+  const ring = (x, y) => Math.min(x - r.x, y - r.y, r.x + r.w - 1 - x, r.y + r.h - 1 - y);
+  for (let y = r.y; y < r.y + r.h; y++) {
+    for (let x = r.x; x < r.x + r.w; x++) {
+      if (!inside(x, y)) continue;
+      const i = idx(x, y);
+      const d = ring(x, y);
+      if (d === 0) continue; // gallery keeps the room elevation
+      if (d === 1) {
+        // A parapet, not a wall. The whole point of a sunken hall is that you
+        // stand on the gallery and see the floor below you.
+        if (cells[i] === C.FLOOR && !isMouth(cells, r, x, y)) cells[i] = C.LEDGE;
+        continue;
+      }
+      elev[i] = hall;
+    }
+  }
+
+  // The way down: a two-cell gap in the ledge and a ramp climbing to it.
+  const side = rng.int(0, 3);
+  const along = (t) => {
+    if (side === 0) return { x: r.x + 2 + t, y: r.y + 1, ix: 0, iy: 1 };
+    if (side === 1) return { x: r.x + 2 + t, y: r.y + r.h - 2, ix: 0, iy: -1 };
+    if (side === 2) return { x: r.x + 1, y: r.y + 2 + t, ix: 1, iy: 0 };
+    return { x: r.x + r.w - 2, y: r.y + 2 + t, ix: -1, iy: 0 };
+  };
+  const span = side < 2 ? r.w - 4 : r.h - 4;
+  const start = rng.int(0, Math.max(0, span - 2));
+  for (let t = start; t < start + 2; t++) {
+    const g = along(t);
+    if (!inside(g.x, g.y)) continue;
+    const gi = idx(g.x, g.y);
+    cells[gi] = C.FLOOR;
+    elev[gi] = r.elev;
+    // Three cells of ramp leading inward, down to the hall floor.
+    for (let k = 1; k <= 3; k++) {
+      const rx = g.x + g.ix * k;
+      const ry = g.y + g.iy * k;
+      if (!inside(rx, ry)) break;
+      const ri = idx(rx, ry);
+      if (cells[ri] === C.SOLID) break;
+      cells[ri] = C.FLOOR;
+      elev[ri] = r.elev + (hall - r.elev) * (k / 3);
+    }
+  }
+}
+
+/**
+ * Terrace: two halves of one room at different heights, split by a retaining
+ * wall with a ramp through it.
+ */
+function carveTerrace(cells, rng, r, elev, relief) {
+  const horizontal = r.w >= r.h;
+  const len = horizontal ? r.w : r.h;
+  const split = Math.round(len / 2) + rng.int(-1, 1);
+  if (split < 3 || split > len - 4) return;
+  const step = 1.6 + relief * 1.7;
+  const upper = r.elev + step;
+
+  for (let y = r.y; y < r.y + r.h; y++) {
+    for (let x = r.x; x < r.x + r.w; x++) {
+      if (!inside(x, y)) continue;
+      const i = idx(x, y);
+      const t = horizontal ? x - r.x : y - r.y;
+      if (t === split) {
+        if (cells[i] === C.FLOOR && !isMouth(cells, r, x, y)) cells[i] = C.LEDGE;
+      } else if (t > split) {
+        elev[i] = upper;
+      }
+    }
+  }
+
+  // Ramp: a gap in the wall plus three cells on the low side climbing to it.
+  const cross = horizontal ? r.h : r.w;
+  const at = rng.int(1, Math.max(1, cross - 2));
+  for (let o = 0; o < 2; o++) {
+    const c = Math.min(cross - 1, at + o);
+    const gx = horizontal ? r.x + split : r.x + c;
+    const gy = horizontal ? r.y + c : r.y + split;
+    if (!inside(gx, gy)) continue;
+    cells[idx(gx, gy)] = C.FLOOR;
+    elev[idx(gx, gy)] = upper;
+    for (let k = 1; k <= 3; k++) {
+      const rx = horizontal ? gx - k : gx;
+      const ry = horizontal ? gy : gy - k;
+      if (!inside(rx, ry)) break;
+      const ri = idx(rx, ry);
+      if (cells[ri] === C.SOLID) break;
+      cells[ri] = C.FLOOR;
+      elev[ri] = upper + (r.elev - upper) * (k / 3);
+    }
+  }
+}
+
+/** Chasm: a band of pit across the room, with one bridge over it. */
+function carveChasm(cells, rng, r) {
+  const horizontal = r.w >= r.h;
+  const len = horizontal ? r.w : r.h;
+  const at = Math.round(len / 2) + rng.int(-1, 1);
+  if (at < 2 || at > len - 3) return;
+  const width = rng.chance(0.45) ? 2 : 1;
+  for (let y = r.y; y < r.y + r.h; y++) {
+    for (let x = r.x; x < r.x + r.w; x++) {
+      if (!inside(x, y)) continue;
+      const t = horizontal ? x - r.x : y - r.y;
+      if (t < at || t >= at + width) continue;
+      const i = idx(x, y);
+      if (cells[i] === C.FLOOR && !isMouth(cells, r, x, y)) cells[i] = C.PIT;
+    }
+  }
+  // The crossing. Two cells wide so a fight on it is not a tightrope.
+  const cross = horizontal ? r.h : r.w;
+  const b = rng.int(1, Math.max(1, cross - 3));
+  for (let o = 0; o < 2; o++) {
+    const c = Math.min(cross - 1, b + o);
+    for (let t = at; t < at + width; t++) {
+      const bx = horizontal ? r.x + t : r.x + c;
+      const by = horizontal ? r.y + c : r.y + t;
+      if (inside(bx, by)) cells[idx(bx, by)] = C.FLOOR;
+    }
+  }
 }
 
 /** Is there already a column within one cell, diagonals included? */

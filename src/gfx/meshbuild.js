@@ -8,7 +8,8 @@
  * Vertex layout (12 floats): position(3) normal(3) uv(2) colour(3) ao(1)
  */
 import { CELL, WALL_H, GRID_W, GRID_H, C } from '../core/constants.js';
-import { groundAt, ceilingAt, floorCorner, ceilCorner } from '../core/world/terrain.js';
+import { groundAt, ceilingAt, floorCorner, ceilCorner, roughAt } from '../core/world/terrain.js';
+import { fieldAt } from '../core/world/contour.js';
 import { TILE, tileUV } from './textures.js';
 import { STYLES } from '../data/decor.js';
 
@@ -324,8 +325,14 @@ export function buildLevelMesh(dungeon, floorDef) {
   const terrain = dungeon.terrain;
   const rooms = dungeon.rooms;
   const roomAt = dungeon.roomAt;
+  const natural = dungeon.natural;
+  const contour = dungeon.contour;
   const base = new MeshBuilder(64000);
   const glow = new MeshBuilder(8000);
+  // Liquids are self-lit too, but far more weakly than a crystal: a lava pool
+  // rendered at crystal brightness is a light box that bleaches the room it is
+  // supposed to light. Separate mesh, separate emissive.
+  const liquid = new MeshBuilder(6000);
   const pal = floorDef.mesh;
 
   // Fixed tiles — the ones that mean something rather than decorate something.
@@ -374,7 +381,13 @@ export function buildLevelMesh(dungeon, floorDef) {
     for (let gx = 0; gx < GRID_W; gx++) {
       const ci = gy * GRID_W + gx;
       const cell = cellOf(cells, gx, gy);
-      if (cell === C.SOLID) continue;
+      const wild = natural ? natural[ci] === 1 : false;
+      // Rock inside a natural region still gets a floor and a ceiling: the
+      // smooth wall stands on them and hides everything beyond it, and without
+      // that overhang the isoline would have nothing under its feet where it
+      // cuts inside the cell boundary.
+      if (cell === C.SOLID && !wild) continue;
+      if (cell === C.SOLID && wild && !nearOpen(cells, gx, gy)) continue;
 
       const rid = roomAt[ci];
       const style = rid >= 0 && rooms[rid] ? resolveStyle(rooms[rid].style) : corridorStyle;
@@ -402,6 +415,39 @@ export function buildLevelMesh(dungeon, floorDef) {
       const isStairs = cell === C.STAIRS;
       const isPillar = cell === C.PILLAR;
 
+      // ---- retaining ledge ---------------------------------------------
+      // A parapet between two floors at different heights. It blocks like a
+      // wall but stops just above the higher floor, so from the gallery you
+      // look over it into the hall below and from the hall you look up at a
+      // cliff. Neighbours draw no wall against it — that is the whole trick,
+      // and it is why this is a cell type rather than a decoration.
+      if (cell === C.LEDGE) {
+        const top = cMaxFloor(f00, f10, f11, f01) + 0.75;
+        const bottom = fMin - 1.2;
+        base.box(
+          x0 + CELL / 2,
+          (top + bottom) / 2,
+          z0 + CELL / 2,
+          CELL,
+          Math.max(0.5, top - bottom),
+          CELL,
+          uvVariant(style.wall, hash),
+          style.wallTint,
+          0.82,
+        );
+        // The ceiling still belongs to the room above it.
+        base.quadAuto(
+          [x0, c01, z1],
+          [x1, c11, z1],
+          [x1, c10, z0],
+          [x0, c00, z0],
+          uvVariant(style.ceil, hash >> 3),
+          style.ceilTint,
+          [0.62, 0.62, 0.62, 0.62],
+        );
+        continue;
+      }
+
       if (cell === C.RUBBLE) {
         base.box(
           x0 + CELL / 2,
@@ -418,7 +464,7 @@ export function buildLevelMesh(dungeon, floorDef) {
 
       // ---- floor -------------------------------------------------------
       if (!isPit) {
-        const target = isHazard ? glow : base;
+        const target = isHazard ? liquid : base;
         const uv = isStairs
           ? uvStairs
           : isHazard
@@ -437,17 +483,59 @@ export function buildLevelMesh(dungeon, floorDef) {
           cornerAO(s, e, solid(cells, gx + 1, gy + 1)),
           cornerAO(s, w, solid(cells, gx - 1, gy + 1)),
         ];
-        target.quadAuto(
-          [x0, f00 - drop, z0],
-          [x1, f10 - drop, z0],
-          [x1, f11 - drop, z1],
-          [x0, f01 - drop, z1],
-          uv,
-          tint,
-          ao,
-        );
+        // Tessellate. One quad per cell is one flat four-unit square, and a
+        // floor made of those is a floor made of squares however good the
+        // texture on it is. Sub-vertices are evaluated with groundAt — the same
+        // function the player's feet use — so the surface they see and the
+        // surface they stand on cannot drift apart, and neighbouring cells
+        // agree along their shared edge for free.
+        const bump = roughAt(terrain, x0 + CELL / 2, z0 + CELL / 2);
+        const N = isHazard || isStairs ? 1 : bump > 0.3 ? 3 : 2;
+        if (N === 1) {
+          target.quadAuto(
+            [x0, f00 - drop, z0],
+            [x1, f10 - drop, z0],
+            [x1, f11 - drop, z1],
+            [x0, f01 - drop, z1],
+            uv,
+            tint,
+            ao,
+          );
+        } else {
+          const step = CELL / N;
+          for (let sy = 0; sy < N; sy++) {
+            for (let sx = 0; sx < N; sx++) {
+              const ax = x0 + sx * step;
+              const az = z0 + sy * step;
+              const bx = ax + step;
+              const bz = az + step;
+              // Bilinear blend of the cell's corner AO across the sub-quad.
+              const aoAt = (u, v) =>
+                (ao[0] * (1 - u) + ao[1] * u) * (1 - v) + (ao[3] * (1 - u) + ao[2] * u) * v;
+              const u0 = sx / N;
+              const u1 = (sx + 1) / N;
+              const v0 = sy / N;
+              const v1 = (sy + 1) / N;
+              // A fresh flip per sub-quad. This is what stops the tiling from
+              // drawing the lattice back on top of the geometry.
+              const sub = uvVariant(uv, (hash ^ (sx * 0x9e37) ^ (sy * 0x85eb)) >>> 0);
+              target.quadAuto(
+                [ax, groundAt(terrain, ax, az) - drop, az],
+                [bx, groundAt(terrain, bx, az) - drop, az],
+                [bx, groundAt(terrain, bx, bz) - drop, bz],
+                [ax, groundAt(terrain, ax, bz) - drop, bz],
+                sub,
+                tint,
+                [aoAt(u0, v0), aoAt(u1, v0), aoAt(u1, v1), aoAt(u0, v1)],
+              );
+            }
+          }
+        }
       } else {
-        const depth = fMin - 5;
+        // A chasm. Deep enough that the fog eats the bottom before the eye
+        // finds it, and shaded down hard from the lip so the drop reads as
+        // depth rather than as a differently-coloured floor.
+        const depth = fMin - 14;
         base.quad(
           [x0, depth, z0],
           [x1, depth, z0],
@@ -455,30 +543,62 @@ export function buildLevelMesh(dungeon, floorDef) {
           [x0, depth, z1],
           [0, 1, 0],
           uvPanel,
-          [0.12, 0.12, 0.14],
-          [0.35, 0.35, 0.35, 0.35],
+          [0.05, 0.05, 0.06],
+          [0.2, 0.2, 0.2, 0.2],
         );
-        const sides = [
-          [[x0, f00, z0], [x1, f10, z0], [x1, depth, z0], [x0, depth, z0], [0, 0, 1]],
-          [[x1, f11, z1], [x0, f01, z1], [x0, depth, z1], [x1, depth, z1], [0, 0, -1]],
-          [[x1, f10, z0], [x1, f11, z1], [x1, depth, z1], [x1, depth, z0], [-1, 0, 0]],
-          [[x0, f01, z1], [x0, f00, z0], [x0, depth, z0], [x0, depth, z1], [1, 0, 0]],
+        // Raised a little above the surrounding floor so the wobble in it can
+        // never open a sliver of daylight at the rim.
+        const r00 = f00 + 0.35;
+        const r10 = f10 + 0.35;
+        const r11 = f11 + 0.35;
+        const r01 = f01 + 0.35;
+        const shaft = [
+          [[x0, r00, z0], [x1, r10, z0], [x1, depth, z0], [x0, depth, z0], [0, 0, 1]],
+          [[x1, r11, z1], [x0, r01, z1], [x0, depth, z1], [x1, depth, z1], [0, 0, -1]],
+          [[x1, r10, z0], [x1, r11, z1], [x1, depth, z1], [x1, depth, z0], [-1, 0, 0]],
+          [[x0, r01, z1], [x0, r00, z0], [x0, depth, z0], [x0, depth, z1], [1, 0, 0]],
         ];
-        for (const [a, b, c, d, nrm] of sides) {
-          base.quad(a, b, c, d, nrm, style.wall, [0.3, 0.3, 0.33], [0.8, 0.8, 0.2, 0.2]);
+        for (const [a, b, c, d, nrm] of shaft) {
+          base.quad(a, b, c, d, nrm, uvRock, [0.34, 0.32, 0.32], [0.95, 0.95, 0.06, 0.06]);
+        }
+        // A broken lip around the hole: without it the chasm is a rectangle
+        // cut out of a floor, which is exactly what it looks like.
+        const lipSides = [
+          [gx, gy - 1, x0 + CELL / 2, z0, 0],
+          [gx, gy + 1, x0 + CELL / 2, z1, 0],
+          [gx - 1, gy, x0, z0 + CELL / 2, Math.PI / 2],
+          [gx + 1, gy, x1, z0 + CELL / 2, Math.PI / 2],
+        ];
+        for (const [nx, ny, lx, lz, yaw] of lipSides) {
+          const nb = cellOf(cells, nx, ny);
+          if (nb === C.PIT || nb === C.SOLID) continue;
+          base.chunk(lx, fMin - 0.35, lz, 0.7, 0.5, 5, yaw + hash * 0.001, uvRock, pal.rubble, hash + nx, 0.8);
         }
       }
 
       // ---- ceiling -----------------------------------------------------
-      base.quadAuto(
-        [x0, c01, z1],
-        [x1, c11, z1],
-        [x1, c10, z0],
-        [x0, c00, z0],
-        uvVariant(style.ceil, hash >> 3),
-        style.ceilTint,
-        [0.7, 0.7, 0.7, 0.7],
-      );
+      {
+        const N = 2;
+        const step = CELL / N;
+        for (let sy = 0; sy < N; sy++) {
+          for (let sx = 0; sx < N; sx++) {
+            const ax = x0 + sx * step;
+            const az = z0 + sy * step;
+            const bx = ax + step;
+            const bz = az + step;
+            const sub = uvVariant(style.ceil, (hash ^ (sx * 0x2545) ^ (sy * 0xc2b2)) >>> 0);
+            base.quadAuto(
+              [ax, ceilingAt(terrain, ax, bz), bz],
+              [bx, ceilingAt(terrain, bx, bz), bz],
+              [bx, ceilingAt(terrain, bx, az), az],
+              [ax, ceilingAt(terrain, ax, az), az],
+              sub,
+              style.ceilTint,
+              [0.7, 0.7, 0.7, 0.7],
+            );
+          }
+        }
+      }
 
       // ---- rock column -------------------------------------------------
       if (isPillar) {
@@ -490,7 +610,7 @@ export function buildLevelMesh(dungeon, floorDef) {
       // Every doorway gets jambs and a lintel. It is the clearest signal the
       // game has that a space was built rather than dug, and it makes the
       // moment of walking from one room's masonry into another's legible.
-      if (cell === C.DOOR) {
+      if (cell === C.DOOR && !wild) {
         // `openZ` means you walk through along Z, so the rock is on the X sides:
         // the lintel spans X and the jambs stand at x0 and x1. Getting this
         // backwards builds the arch along the passage instead of across it.
@@ -523,7 +643,19 @@ export function buildLevelMesh(dungeon, floorDef) {
         }
       }
 
+      // A cave draws no wall faces at all — its walls come from the contour
+      // pass below, as one continuous curved surface.
+      if (wild) continue;
+
       // ---- walls -------------------------------------------------------
+      // Dropped below the corner heights: the floor in front of them now
+      // wobbles by up to half a unit either way, and a wall that starts exactly
+      // at the corner height opens a slot under itself wherever the ground dips.
+      const skirt = 0.85;
+      const w00 = f00 - skirt;
+      const w10 = f10 - skirt;
+      const w11 = f11 - skirt;
+      const w01 = f01 - skirt;
       const isDoor = cell === C.DOOR;
       const wallUv = isDoor ? uvTrim : uvVariant(style.wall, hash);
       const wallTint = isDoor ? pal.trim : style.wallTint;
@@ -536,7 +668,7 @@ export function buildLevelMesh(dungeon, floorDef) {
         const rw = solid(cells, gx + 1, gy - 1) || solid(cells, gx + 1, gy);
         wallFace(
           base, glow,
-          [x0, c00, z0], [x1, c10, z0], [x1, f10, z0], [x0, f00, z0],
+          [x0, c00, z0], [x1, c10, z0], [x1, w10, z0], [x0, w00, z0],
           [0, 0, -1], wallUv, wallTint, edgeAO(lw, rw), niche, uvMortar, uvCrystal, nicheGlow,
         );
       }
@@ -545,7 +677,7 @@ export function buildLevelMesh(dungeon, floorDef) {
         const rw = solid(cells, gx - 1, gy + 1) || solid(cells, gx - 1, gy);
         wallFace(
           base, glow,
-          [x1, c11, z1], [x0, c01, z1], [x0, f01, z1], [x1, f11, z1],
+          [x1, c11, z1], [x0, c01, z1], [x0, w01, z1], [x1, w11, z1],
           [0, 0, 1], wallUv, wallTint, edgeAO(lw, rw), niche, uvMortar, uvCrystal, nicheGlow,
         );
       }
@@ -554,7 +686,7 @@ export function buildLevelMesh(dungeon, floorDef) {
         const rw = solid(cells, gx + 1, gy + 1);
         wallFace(
           base, glow,
-          [x1, c10, z0], [x1, c11, z1], [x1, f11, z1], [x1, f10, z0],
+          [x1, c10, z0], [x1, c11, z1], [x1, w11, z1], [x1, w10, z0],
           [1, 0, 0], wallUv, wallTint, edgeAO(lw, rw), niche, uvMortar, uvCrystal, nicheGlow,
         );
       }
@@ -563,11 +695,16 @@ export function buildLevelMesh(dungeon, floorDef) {
         const rw = solid(cells, gx - 1, gy - 1);
         wallFace(
           base, glow,
-          [x0, c01, z1], [x0, c00, z0], [x0, f00, z0], [x0, f01, z1],
+          [x0, c01, z1], [x0, c00, z0], [x0, w00, z0], [x0, w01, z1],
           [-1, 0, 0], wallUv, wallTint, edgeAO(lw, rw), niche, uvMortar, uvCrystal, nicheGlow,
         );
       }
     }
+  }
+
+  // ---- cave walls ------------------------------------------------------
+  if (contour && contour.count) {
+    buildContourWalls(base, contour, terrain, tileUV(TILE.ROCK), pal);
   }
 
   // ---- scatter ---------------------------------------------------------
@@ -612,7 +749,104 @@ export function buildLevelMesh(dungeon, floorDef) {
     );
   }
 
-  return { solid: base.finish(), glow: glow.finish() };
+  return { solid: base.finish(), glow: glow.finish(), liquid: liquid.finish() };
+}
+
+const cMaxFloor = (a, b, c, d) => Math.max(a, b, c, d);
+
+/** Is any of the four neighbours walkable? */
+function nearOpen(cells, gx, gy) {
+  for (let k = 0; k < 4; k++) {
+    const nx = gx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+    const ny = gy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+    const c = cellOf(cells, nx, ny);
+    if (c !== C.SOLID) return true;
+  }
+  return false;
+}
+
+/**
+ * Extrude the cave isoline into wall.
+ *
+ * Each segment becomes one quad from the ground to the ceiling at its own two
+ * endpoints, so the wall follows the relief instead of sitting on a datum. The
+ * open side is found by sampling the density field a little off the segment
+ * rather than by trusting the marching-squares winding, which is the kind of
+ * thing that is right in fifteen cases and silently inside-out in the
+ * sixteenth.
+ */
+function buildContourWalls(mb, contour, terrain, uv, pal) {
+  const seg = contour.segments;
+  const tint = pal.wall;
+  for (let i = 0; i < contour.count; i++) {
+    let ax = seg[i * 4];
+    let az = seg[i * 4 + 1];
+    let bx = seg[i * 4 + 2];
+    let bz = seg[i * 4 + 3];
+
+    const dx = bx - ax;
+    const dz = bz - az;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-4) continue;
+
+    // Quad order (TL,TR,BR,BL) on this segment shows the side that (-dz, dx)
+    // points at. If that side is the rock, swap the ends.
+    const nx = -dz / len;
+    const nz = dx / len;
+    const mx = (ax + bx) / 2;
+    const mz = (az + bz) / 2;
+    const probe = 0.6;
+    if (fieldAt(contour, mx + nx * probe, mz + nz * probe) < fieldAt(contour, mx - nx * probe, mz - nz * probe)) {
+      const tx = ax; ax = bx; bx = tx;
+      const tz = az; az = bz; bz = tz;
+    }
+
+    // Sampled just inside the open side, because directly on the wall the
+    // height fields are already averaging in the rock behind it.
+    const ox = (-(bz - az) / len) * 0.5;
+    const oz = ((bx - ax) / len) * 0.5;
+    const fa = groundAt(terrain, ax + ox, az + oz) - 0.9;
+    const fb = groundAt(terrain, bx + ox, bz + oz) - 0.9;
+    const ca = ceilingAt(terrain, ax + ox, az + oz) + 0.15;
+    const cb = ceilingAt(terrain, bx + ox, bz + oz) + 0.15;
+
+    // Recompute the open-side normal after any swap above.
+    const ux = (bx - ax) / len;
+    const uz = (bz - az) / len;
+    const onx = -uz;
+    const onz = ux;
+
+    // Bands. A single quad from floor to ceiling stretches one tile over three
+    // and a half units and lights as one flat plane, which is why the first
+    // version looked like putty. Three bands give the texture something to
+    // repeat over, the shading somewhere to fall off, and — with a little
+    // displacement along the normal — the bulges and overhangs that stop a
+    // cave wall from being an extruded line.
+    const BANDS = 3;
+    const wobble = (t, e) => {
+      const k = (Math.imul(i + 1, 2654435761) ^ Math.imul(((t * 7) | 0) + e * 31, 40503)) >>> 0;
+      const h = Math.imul(k ^ (k >>> 13), 1274126177) >>> 0;
+      return (((h ^ (h >>> 16)) >>> 0) / 4294967296 - 0.5) * 0.55;
+    };
+    let prevA = [ax, fa, az];
+    let prevB = [bx, fb, bz];
+    for (let band = 1; band <= BANDS; band++) {
+      const t = band / BANDS;
+      // Pushed into the rock in the middle of the wall and back out at the
+      // top: a section that leans rather than stands.
+      const bulgeA = wobble(t, 0) * Math.sin(t * Math.PI);
+      const bulgeB = wobble(t, 1) * Math.sin(t * Math.PI);
+      const ya = fa + (ca - fa) * t;
+      const yb = fb + (cb - fb) * t;
+      const curA = [ax - onx * bulgeA, ya, az - onz * bulgeA];
+      const curB = [bx - onx * bulgeB, yb, bz - onz * bulgeB];
+      const lo = 0.5 + 0.5 * ((band - 1) / BANDS);
+      const hi = 0.5 + 0.5 * (band / BANDS);
+      mb.quadAuto(curA, curB, prevB, prevA, uv, tint, [hi, hi, lo, lo]);
+      prevA = curA;
+      prevB = curB;
+    }
+  }
 }
 
 function edgeAO(lw, rw) {
@@ -791,6 +1025,90 @@ function drawProp(base, glow, pr, seed, uvFor, uvs) {
       base.prism(pr.x, pr.y - 0.08, pr.z, 6, pr.r * 0.45, pr.r, 0.17, uvs.wall, pal.trim, pr.yaw, 0.85);
       glow.prism(pr.x, pr.y + 0.06, pr.z, 5, pr.r * 0.78, 0.02, pr.r * 2.1, uvs.glow, pr.color, pr.yaw + 0.4, 1);
       glow.prism(pr.x, pr.y + 0.04, pr.z, 5, pr.r * 0.4, 0.02, pr.r * 1.2, uvs.glow, [1, 1, 0.9], pr.yaw, 1);
+      break;
+    }
+
+    case 'stream': {
+      // Spout, fall, pool. The fall is a flat ribbon rather than a cylinder:
+      // at this resolution a ribbon reads as moving water and costs a quarter
+      // as much geometry.
+      base.prism(pr.x, pr.y - 0.12, pr.z, 5, pr.r * 1.9, pr.r * 1.4, 0.24, uvs.wall, pal.trim, pr.yaw, 0.8);
+      const fall = pr.y - pr.ground;
+      if (fall > 0.2) {
+        glow.slab(
+          (pr.x + pr.poolX) / 2,
+          pr.ground + fall / 2,
+          (pr.z + pr.poolZ) / 2,
+          pr.r * 2.2,
+          fall,
+          pr.r * 0.9,
+          pr.yaw,
+          0,
+          uvs.crystal,
+          pr.color,
+          1,
+        );
+      }
+      glow.chunk(pr.poolX, pr.ground - 0.04, pr.poolZ, pr.poolR, 0.09, 6, pr.yaw, uvs.crystal, pr.color, 7, 1);
+      break;
+    }
+
+    case 'vine': {
+      // Segments that lean further the lower they hang, so a vine curves
+      // instead of dropping like a wire.
+      let px = pr.x;
+      let pz = pr.z;
+      let py = pr.y;
+      const segH = pr.h / pr.segs;
+      for (let i = 0; i < pr.segs; i++) {
+        const t = (i + 1) / pr.segs;
+        const nx = px + Math.cos(pr.yaw) * pr.lean * segH * t;
+        const nz = pz + Math.sin(pr.yaw) * pr.lean * segH * t;
+        base.prism(
+          (px + nx) / 2, py - segH, (pz + nz) / 2,
+          3, pr.r * (1 - t * 0.4), pr.r * (1 - (t - 0.2) * 0.4), segH,
+          uvFor.strand, pal.hazard, pr.yaw + i, 0.85,
+        );
+        px = nx;
+        pz = nz;
+        py -= segH;
+      }
+      if (pr.leaves) {
+        for (let i = 0; i < 3; i++) {
+          const t = 0.3 + i * 0.25;
+          base.slab(
+            pr.x + (px - pr.x) * t,
+            pr.y - pr.h * t,
+            pr.z + (pz - pr.z) * t,
+            0.34, 0.04, 0.16,
+            pr.yaw + i * 1.9, 0.3,
+            uvFor.strand, pr.color || pal.hazard, 0.9,
+          );
+        }
+      }
+      break;
+    }
+
+    case 'grass': {
+      // Blades: thin tapered prisms fanned out and tilted. Three to five of
+      // them is a tuft; anything more is a lawn nobody asked for.
+      for (let i = 0; i < pr.blades; i++) {
+        const a = pr.yaw + (i / pr.blades) * Math.PI * 2;
+        const lean = 0.18 + (i % 2) * 0.1;
+        base.prism(
+          pr.x + Math.cos(a) * pr.r * 0.4,
+          pr.y,
+          pr.z + Math.sin(a) * pr.r * 0.4,
+          3,
+          0.05,
+          0.012,
+          pr.h * (0.7 + (i % 3) * 0.18),
+          uvFor.strand,
+          pr.color || pal.hazard,
+          a + lean,
+          0.95,
+        );
+      }
       break;
     }
 

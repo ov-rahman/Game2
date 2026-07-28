@@ -14,7 +14,7 @@
  * player's eye, monster feet, pickups and props all stand on it.
  */
 import { GRID_W, GRID_H, CELL, WALL_H, C } from '../constants.js';
-import { decorFor } from '../../data/decor.js';
+import { decorFor, NATURAL_KINDS } from '../../data/decor.js';
 
 /** Corner lattice dimensions. */
 export const CORNER_W = GRID_W + 1;
@@ -79,28 +79,27 @@ export function buildTerrain(rng, dungeon, floorDef) {
   const seedA = rng.nextU32();
   const seedB = rng.nextU32();
 
-  // ---- per-room plateaus ------------------------------------------------
-  // Each room sits at its own elevation with its own headroom: some are sunken
-  // pits you drop into, some are raised galleries you climb up to. This is
-  // where the relief lives. The floor inside a room stays close to level on
-  // purpose — a brick floor that ripples reads as a bug, not as terrain, so the
-  // unevenness a player actually sees is the scattered geometry, not the plane.
+  // ---- pinned elevations ------------------------------------------------
+  // The generator decides what height each room cell sits at, because only it
+  // knows the floor plan: a sunken hall, a terrace and its ramp are all just
+  // per-cell elevations it has already worked out. Everything else — corridors
+  // and rock — settles between them below.
+  //
+  // The floor inside a level region stays flat on purpose. A brick floor that
+  // ripples reads as a bug, not as terrain, so the unevenness a player sees is
+  // the scattered geometry and the changes of level, not the plane itself.
   const baseFloor = new Float32Array(GRID_W * GRID_H);
   const baseCeil = new Float32Array(GRID_W * GRID_H);
   const pinned = new Uint8Array(GRID_W * GRID_H);
 
-  for (const r of rooms) {
-    // The start room stays at zero so the player never spawns inside a slope.
-    const elev = r.id === 0 ? 0 : rng.range(-1, 1) * relief * 1.9;
-    const head = rng.range(-0.35, 1.0) * relief * 2.2;
-    for (let y = r.y; y < r.y + r.h; y++) {
-      for (let x = r.x; x < r.x + r.w; x++) {
-        const i = cellIdx(x, y);
-        baseFloor[i] = elev;
-        baseCeil[i] = head;
-        pinned[i] = 1;
-      }
-    }
+  const pinElev = dungeon.elev;
+  const pinSet = dungeon.elevSet;
+  const pinHead = dungeon.headroom;
+  for (let i = 0; i < baseFloor.length; i++) {
+    if (!pinSet || !pinSet[i]) continue;
+    baseFloor[i] = pinElev[i];
+    baseCeil[i] = pinHead ? pinHead[i] : 0;
+    pinned[i] = 1;
   }
 
   // ---- relax the rest ---------------------------------------------------
@@ -135,35 +134,73 @@ export function buildTerrain(rng, dungeon, floorDef) {
   // ---- corner heights ---------------------------------------------------
   const floorH = new Float32Array(CORNER_W * CORNER_H);
   const ceilH = new Float32Array(CORNER_W * CORNER_H);
+  // How much sub-cell bumpiness the ground carries here. Stored per corner and
+  // interpolated, so it changes smoothly from a flagstone hall into a cave
+  // instead of stepping at the cell boundary. Zero over liquids and stairs,
+  // which have to stay dead level to read as what they are.
+  const rough = new Float32Array(CORNER_W * CORNER_H);
+
+  // Corners locked to a single elevation: a floor a player stands on, which the
+  // slope limiter below is not allowed to tilt.
+  const locked = new Uint8Array(CORNER_W * CORNER_H);
 
   for (let cy = 0; cy < CORNER_H; cy++) {
     for (let cx = 0; cx < CORNER_W; cx++) {
-      // Average of the up-to-four cells that share this corner.
+      // Average of the cells that share this corner — but *only the open ones*
+      // when there are any. This is what lets a cliff exist: a corner on the
+      // low side of a retaining wall takes the low floor's height and nothing
+      // else, so the floor stays level right up to the rock instead of ramping
+      // into it, and the wall face rises from the level the player walks on.
       let sf = 0;
       let sc = 0;
       let n = 0;
-      // Liquids and stairs must stay dead level, so a corner touching one
-      // takes no noise at all: the crease that produces reads as a shoreline.
+      let rf = 0;
+      let rc = 0;
+      let rn = 0;
       let level = false;
+      let uniform = true;
+      let firstElev = null;
+      let anyPinned = false;
       for (let oy = -1; oy <= 0; oy++) {
         for (let ox = -1; ox <= 0; ox++) {
           const x = cx + ox;
           const y = cy + oy;
           if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue;
           const i = cellIdx(x, y);
+          const c = cells[i];
+          rf += baseFloor[i];
+          rc += baseCeil[i];
+          rn++;
+          if (c === C.SOLID || c === C.PILLAR || c === C.RUBBLE || c === C.LEDGE) continue;
           sf += baseFloor[i];
           sc += baseCeil[i];
           n++;
-          const c = cells[i];
+          if (firstElev === null) firstElev = baseFloor[i];
+          else if (Math.abs(baseFloor[i] - firstElev) > 0.001) uniform = false;
+          if (pinned[i]) anyPinned = true;
           if (c === C.HAZARD || c === C.STAIRS || c === C.PIT) level = true;
         }
       }
-      const bf = n ? sf / n : 0;
-      const bc = n ? sc / n : 0;
+      const bf = n ? sf / n : rn ? rf / rn : 0;
+      const bc = n ? sc / n : rn ? rc / rn : 0;
+      if (n && uniform && anyPinned) locked[cornerIdx(cx, cy)] = 1;
 
-      // A slight settle in the flagstones, nothing more. The ceiling is free to
-      // be as broken as it likes — nobody walks on it.
-      const detail = level ? 0 : fbm(cx * 0.38, cy * 0.38, seedA) * relief * 0.34;
+      // A slight settle in the flagstones, nothing more — except in a cave,
+      // where the floor is rock and *should* roll. A rippling brick floor reads
+      // as a bug; a flat cave floor reads as a warehouse.
+      let wildHere = false;
+      if (dungeon.natural) {
+        for (let oy = -1; oy <= 0 && !wildHere; oy++) {
+          for (let ox = -1; ox <= 0; ox++) {
+            const x = cx + ox;
+            const y = cy + oy;
+            if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue;
+            if (dungeon.natural[cellIdx(x, y)]) { wildHere = true; break; }
+          }
+        }
+      }
+      const amp = wildHere ? 1.5 : 0.34;
+      const detail = level ? 0 : fbm(cx * (wildHere ? 0.5 : 0.38), cy * (wildHere ? 0.5 : 0.38), seedA) * relief * amp;
       const roof = level
         ? fbm(cx * 0.34, cy * 0.34, seedB) * relief * 0.7
         : fbm(cx * 0.34, cy * 0.34, seedB) * relief * 2.1;
@@ -176,47 +213,72 @@ export function buildTerrain(rng, dungeon, floorDef) {
       const ci = cornerIdx(cx, cy);
       floorH[ci] = f;
       ceilH[ci] = f + headroom;
+      rough[ci] = level ? 0 : wildHere ? relief * 0.62 : relief * 0.2;
     }
   }
 
   // ---- slope limit ------------------------------------------------------
-  // Room elevations plus a short corridor between them can produce a cliff.
-  // Nothing in the game climbs, so clamp the rise between adjacent corners to
-  // something a person walks up: 1.1 over a 4-unit cell is about fifteen
-  // degrees. A few passes settle it without flattening the relief.
+  // Nothing in the game climbs, so a rise the player has to walk up is capped
+  // at 1.1 over a 4-unit cell — about fifteen degrees. Two things are exempt.
+  //
+  // A locked corner belongs to a level floor inside a room and never moves: a
+  // tilted room floor is worse than a steep corridor.
+  //
+  // A span whose flanking cells are both rock is a *cliff*, not a slope. It is
+  // the retaining wall of a terrace or the lip of a sunken hall, and nobody
+  // walks up it — the whole point is that you have to go round.
   const MAX_RISE = 1.1;
-  for (let pass = 0; pass < 6; pass++) {
+  const blocking = (x, y) => {
+    if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) return true;
+    const c = cells[cellIdx(x, y)];
+    return c === C.SOLID || c === C.PILLAR || c === C.RUBBLE || c === C.LEDGE;
+  };
+  for (let pass = 0; pass < 8; pass++) {
     let changed = false;
     for (let cy = 0; cy < CORNER_H; cy++) {
       for (let cx = 0; cx < CORNER_W; cx++) {
         const i = cornerIdx(cx, cy);
         for (let k = 0; k < 2; k++) {
-          const j = k === 0 ? (cx + 1 < CORNER_W ? i + 1 : -1) : (cy + 1 < CORNER_H ? i + CORNER_W : -1);
-          if (j < 0) continue;
-          const d = floorH[j] - floorH[i];
-          if (d > MAX_RISE) {
-            const fix = (d - MAX_RISE) * 0.5;
-            floorH[i] += fix;
-            floorH[j] -= fix;
-            ceilH[i] += fix;
-            ceilH[j] -= fix;
-            changed = true;
-          } else if (d < -MAX_RISE) {
-            const fix = (-d - MAX_RISE) * 0.5;
-            floorH[i] -= fix;
-            floorH[j] += fix;
-            ceilH[i] -= fix;
-            ceilH[j] += fix;
-            changed = true;
+          let j = -1;
+          let cliff = false;
+          if (k === 0) {
+            if (cx + 1 >= CORNER_W) continue;
+            j = i + 1;
+            // The edge from corner (cx,cy) to (cx+1,cy) runs between these two.
+            cliff = blocking(cx, cy - 1) && blocking(cx, cy);
+          } else {
+            if (cy + 1 >= CORNER_H) continue;
+            j = i + CORNER_W;
+            cliff = blocking(cx - 1, cy) && blocking(cx, cy);
           }
+          if (cliff) continue;
+          const d = floorH[j] - floorH[i];
+          const over = Math.abs(d) - MAX_RISE;
+          if (over <= 0) continue;
+          const li = locked[i];
+          const lj = locked[j];
+          if (li && lj) continue;
+          const sign = d > 0 ? 1 : -1;
+          // Push the whole correction into whichever end is free to move.
+          const share = li || lj ? 1 : 0.5;
+          if (!li) {
+            floorH[i] += sign * over * share;
+            ceilH[i] += sign * over * share;
+          }
+          if (!lj) {
+            floorH[j] -= sign * over * share;
+            ceilH[j] -= sign * over * share;
+          }
+          changed = true;
         }
       }
     }
     if (!changed) break;
   }
 
-  const terrain = { floorH, ceilH, props: [] };
+  const terrain = { floorH, ceilH, rough, detailSeed: rng.nextU32(), props: [] };
   terrain.props = scatterProps(rng, cells, roomAt, rooms, terrain, floorDef);
+  placeSetPieces(rng, cells, rooms, terrain, floorDef);
   return terrain;
 }
 
@@ -245,16 +307,49 @@ function sample(field, x, z) {
   return top + (bot - top) * tz;
 }
 
+/**
+ * Sub-cell relief.
+ *
+ * The corner lattice gives the ground its large shape — which room is higher
+ * than which — but between corners it is a flat four-unit quad, and a floor
+ * made of flat four-unit quads is a floor made of squares. This is the wobble
+ * underneath that, at roughly a three-unit wavelength.
+ *
+ * It lives in groundAt rather than in the mesh builder on purpose: the surface
+ * the player walks on and the surface they can see have to be the same one.
+ */
+function detailNoise(x, z, seed) {
+  return (
+    valueNoise(x * 0.33, z * 0.33, seed) * 0.66 +
+    valueNoise(x * 0.86 + 13.7, z * 0.86 - 4.9, seed ^ 0x77c1) * 0.34
+  );
+}
+
 /** Ground height at a world position. The one function gameplay calls. */
 export function groundAt(terrain, x, z) {
   if (!terrain) return 0;
-  return sample(terrain.floorH, x, z);
+  const base = sample(terrain.floorH, x, z);
+  if (!terrain.rough) return base;
+  const amp = sample(terrain.rough, x, z);
+  if (amp <= 0.0001) return base;
+  return base + detailNoise(x, z, terrain.detailSeed) * amp;
 }
 
 /** Ceiling height at a world position. */
 export function ceilingAt(terrain, x, z) {
   if (!terrain) return WALL_H;
-  return sample(terrain.ceilH, x, z);
+  const base = sample(terrain.ceilH, x, z);
+  if (!terrain.rough) return base;
+  const amp = sample(terrain.rough, x, z);
+  if (amp <= 0.0001) return base;
+  // The roof gets a coarser, deeper version of the same wobble.
+  return base - detailNoise(x * 0.7 + 51.3, z * 0.7 - 27.1, terrain.detailSeed ^ 0x1234) * amp * 1.5;
+}
+
+/** How bumpy the ground is here — the mesh builder uses it to pick a tessellation. */
+export function roughAt(terrain, x, z) {
+  if (!terrain || !terrain.rough) return 0;
+  return sample(terrain.rough, x, z);
 }
 
 /** Corner accessors for the mesh builder — exact values, no interpolation. */
@@ -288,17 +383,26 @@ function scatterProps(rng, cells, roomAt, rooms, terrain, floorDef) {
   const density = (floorDef.scatter == null ? 1 : floorDef.scatter) * (decor.density || 1);
   if (density <= 0) return props;
 
+  // Two tables: everything the floor offers, and the subset a cave is allowed
+  // to grow. A natural room with a wall sconce in it stops being natural.
   const table = decor.scatter;
-  let totalWeight = 0;
-  for (const e of table) totalWeight += e.weight || 1;
+  const natural = table.filter((e) => NATURAL_KINDS.has(e.kind));
+  const weigh = (list) => {
+    let total = 0;
+    for (const e of list) total += e.weight || 1;
+    return total;
+  };
+  const totalWeight = weigh(table);
+  const naturalWeight = weigh(natural);
 
-  const pickKind = () => {
-    let r = rng.next() * totalWeight;
-    for (const e of table) {
+  const pickKind = (wild) => {
+    const list = wild && natural.length ? natural : table;
+    let r = rng.next() * (wild && natural.length ? naturalWeight : totalWeight);
+    for (const e of list) {
       r -= e.weight || 1;
       if (r <= 0) return e;
     }
-    return table[table.length - 1];
+    return list[list.length - 1];
   };
 
   for (let gy = 1; gy < GRID_H - 1; gy++) {
@@ -322,11 +426,16 @@ function scatterProps(rng, cells, roomAt, rooms, terrain, floorDef) {
 
       // Doorways stay clear of everything but the arch overhead.
       const inDoor = cell === C.DOOR;
-      const tries = inDoor ? 1 : rng.chance(0.22 * density) ? 2 : 1;
+      const rid = roomAt[cellIdx(gx, gy)];
+      const room = rid >= 0 && rooms ? rooms[rid] : null;
+      const wild = !!room && room.plan === 'cave';
+      // A cave earns its character from being crowded with growth.
+      const local = density * (wild ? 1.5 : 1);
+      const tries = inDoor ? 1 : rng.chance(0.22 * local) ? 2 : 1;
 
       for (let t = 0; t < tries; t++) {
-        if (!rng.chance(0.3 * density)) continue;
-        const entry = pickKind();
+        if (!rng.chance(0.3 * local)) continue;
+        const entry = pickKind(wild);
         const made = placeProp(rng, entry, {
           props,
           cxw,
@@ -336,6 +445,7 @@ function scatterProps(rng, cells, roomAt, rooms, terrain, floorDef) {
           headroom,
           sides,
           inDoor,
+          floorDef,
         });
         if (!made) continue;
       }
@@ -344,11 +454,158 @@ function scatterProps(rng, cells, roomAt, rooms, terrain, floorDef) {
   return props;
 }
 
+/**
+ * Set pieces: the things that are one arrangement rather than one object.
+ *
+ * Scattered decoration says "stuff grows here". A ring of stones around a cold
+ * firepit with two logs pulled up to it says somebody sat here, and that is a
+ * different kind of information. One per room at most, in the middle, where the
+ * player will actually walk past it.
+ */
+function placeSetPieces(rng, cells, rooms, terrain, floorDef) {
+  const decor = decorFor(floorDef);
+  const kinds = decor.sets || [];
+  if (!kinds.length) return;
+
+  for (const r of rooms) {
+    if (r.plan === 'chasm') continue;
+    if (!rng.chance(decor.setChance == null ? 0.4 : decor.setChance)) continue;
+
+    // Somewhere off-centre and clear: the middle of a room is where fights
+    // happen and where the pedestal goes.
+    let gx = 0;
+    let gy = 0;
+    let found = false;
+    for (let t = 0; t < 20; t++) {
+      gx = rng.int(r.x + 1, r.x + r.w - 2);
+      gy = rng.int(r.y + 1, r.y + r.h - 2);
+      if (cellAt(cells, gx, gy) !== C.FLOOR) continue;
+      if (Math.abs(gx - r.cx) <= 1 && Math.abs(gy - r.cy) <= 1) continue;
+      found = true;
+      break;
+    }
+    if (!found) continue;
+
+    const x = (gx + 0.5) * CELL;
+    const z = (gy + 0.5) * CELL;
+    const ground = groundAt(terrain, x, z);
+    const kind = rng.pick(kinds);
+    const yaw = rng.angle();
+
+    if (kind === 'camp') {
+      // Firepit: a ring of stones, ash inside, logs around it.
+      const ringR = rng.range(0.7, 1.0);
+      const stones = rng.int(5, 8);
+      for (let i = 0; i < stones; i++) {
+        const a = yaw + (i / stones) * Math.PI * 2;
+        terrain.props.push({
+          kind: 'rock',
+          x: x + Math.cos(a) * ringR,
+          z: z + Math.sin(a) * ringR,
+          y: ground - 0.05,
+          r: rng.range(0.16, 0.28),
+          h: rng.range(0.16, 0.3),
+          sides: 5,
+          yaw: a,
+        });
+      }
+      terrain.props.push({
+        kind: 'embers',
+        x,
+        z,
+        y: ground,
+        r: ringR * 0.55,
+        color: (floorDef.liquid && floorDef.liquid.color) || [1, 0.6, 0.25],
+        glow: true,
+        lit: true,
+      });
+      const logs = rng.int(2, 3);
+      for (let i = 0; i < logs; i++) {
+        const a = yaw + 0.7 + (i / logs) * Math.PI * 2;
+        terrain.props.push({
+          kind: 'log',
+          x: x + Math.cos(a) * (ringR + 0.85),
+          z: z + Math.sin(a) * (ringR + 0.85),
+          y: ground + 0.14,
+          len: rng.range(1.1, 1.7),
+          r: rng.range(0.13, 0.2),
+          yaw: a + Math.PI / 2,
+        });
+      }
+      if (rng.chance(0.6)) {
+        terrain.props.push({
+          kind: 'crate',
+          x: x + Math.cos(yaw + 2.4) * 1.6,
+          z: z + Math.sin(yaw + 2.4) * 1.6,
+          y: ground,
+          s: rng.range(0.42, 0.62),
+          yaw: rng.angle(),
+        });
+      }
+    } else if (kind === 'ruin') {
+      // A wall that fell over: a stub, the course of stones it shed, and a
+      // broken column lying where it landed.
+      const len = rng.range(1.8, 3.2);
+      terrain.props.push({
+        kind: 'wallStub',
+        x,
+        z,
+        y: ground,
+        len,
+        h: rng.range(0.5, 1.0),
+        thick: rng.range(0.42, 0.62),
+        yaw,
+      });
+      const debris = rng.int(4, 7);
+      for (let i = 0; i < debris; i++) {
+        const d = rng.range(0.6, 2.2);
+        terrain.props.push({
+          kind: 'rock',
+          x: x + Math.cos(yaw + Math.PI / 2) * d + rng.range(-0.4, 0.4),
+          z: z + Math.sin(yaw + Math.PI / 2) * d + rng.range(-0.4, 0.4),
+          y: ground - 0.06,
+          r: rng.range(0.2, 0.4),
+          h: rng.range(0.12, 0.28),
+          sides: 5,
+          yaw: rng.angle(),
+        });
+      }
+      terrain.props.push({
+        kind: 'log',
+        x: x + Math.cos(yaw + Math.PI / 2) * rng.range(1.0, 1.8),
+        z: z + Math.sin(yaw + Math.PI / 2) * rng.range(1.0, 1.8),
+        y: ground + 0.2,
+        len: rng.range(1.4, 2.4),
+        r: rng.range(0.2, 0.3),
+        yaw: yaw + rng.range(-0.5, 0.5),
+        stone: true,
+      });
+    } else if (kind === 'cairnStack') {
+      const n = rng.int(2, 4);
+      for (let i = 0; i < n; i++) {
+        const a = yaw + (i / n) * Math.PI * 2;
+        terrain.props.push({
+          kind: 'cairn',
+          x: x + Math.cos(a) * rng.range(0.5, 1.4),
+          z: z + Math.sin(a) * rng.range(0.5, 1.4),
+          y: ground,
+          r: rng.range(0.28, 0.44),
+          h: rng.range(0.5, 1.0),
+          layers: rng.int(3, 5),
+          yaw: rng.angle(),
+        });
+      }
+    }
+  }
+}
+
 /** Place one decoration. Returns false when the spot cannot host that kind. */
 function placeProp(rng, entry, ctx) {
-  const { props, cxw, czw, ground, roof, headroom, sides, inDoor } = ctx;
+  const { props, cxw, czw, ground, roof, headroom, sides, inDoor, floorDef } = ctx;
   const wall = sides.length ? rng.pick(sides) : null;
-  const color = entry.color || null;
+  // `liquid` entries take the floor's own fluid rather than a fixed colour, so
+  // one table row gives water on floor two and lava on floor four.
+  const color = entry.liquid && floorDef.liquid ? floorDef.liquid.color : entry.color || null;
   const glow = !!entry.glow;
 
   // Offset toward a wall: `f` of the way from the cell centre to the face.
@@ -596,6 +853,75 @@ function placeProp(rng, entry, ctx) {
         glow: true,
         lit: true,
       });
+      return true;
+    }
+
+    case 'stream': {
+      // A spout in the wall and what comes out of it. Whatever the floor runs
+      // with — water, sap, slag, lava, acid — it is the same three pieces.
+      if (!wall) return false;
+      const spoutY = ground + rng.range(1.9, Math.min(2.9, roof - ground - 0.5));
+      if (spoutY <= ground + 1.2) return false;
+      props.push({
+        kind: 'stream',
+        x: cxw + wall[0] * (CELL / 2 - 0.25),
+        z: czw + wall[1] * (CELL / 2 - 0.25),
+        y: spoutY,
+        ground,
+        r: rng.range(0.1, 0.22),
+        yaw: wall[1] !== 0 ? 0 : Math.PI / 2,
+        // The pool it has worn into the floor, offset out from the wall.
+        poolX: cxw + wall[0] * (CELL / 2 - 0.95),
+        poolZ: czw + wall[1] * (CELL / 2 - 0.95),
+        poolR: rng.range(0.55, 1.1),
+        color,
+        glow: true,
+        lit: rng.chance(0.5),
+      });
+      return true;
+    }
+
+    case 'vine': {
+      if (headroom < 2.4) return false;
+      const n = rng.int(2, 4);
+      for (let i = 0; i < n; i++) {
+        const len = Math.min(rng.range(0.7, 2.2), headroom - 1.9);
+        if (len < 0.4) continue;
+        props.push({
+          kind: 'vine',
+          x: cxw + rng.range(-1.6, 1.6),
+          z: czw + rng.range(-1.6, 1.6),
+          y: roof,
+          r: rng.range(0.05, 0.12),
+          h: len,
+          segs: rng.int(2, 4),
+          lean: rng.range(0.05, 0.35),
+          yaw: rng.angle(),
+          leaves: rng.chance(0.6),
+          color,
+        });
+      }
+      return true;
+    }
+
+    case 'grass': {
+      // Tufts, and they cluster where something sheltered them: the foot of a
+      // wall, the lee of a stone.
+      const p = wall ? toward(0.66) : { x: cxw, z: czw };
+      const n = rng.int(3, 7);
+      for (let i = 0; i < n; i++) {
+        props.push({
+          kind: 'grass',
+          x: p.x + rng.range(-1.0, 1.0),
+          z: p.z + rng.range(-1.0, 1.0),
+          y: ground,
+          r: rng.range(0.1, 0.24),
+          h: rng.range(0.16, 0.42),
+          blades: rng.int(3, 5),
+          yaw: rng.angle(),
+          color,
+        });
+      }
       return true;
     }
 

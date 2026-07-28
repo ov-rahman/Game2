@@ -10,6 +10,7 @@ import { CELL, C, GRID_W, GRID_H } from '../constants.js';
 export function solidFor(cell, opts) {
   if (cell === C.SOLID) return true;
   if (cell === C.PILLAR) return true;
+  if (cell === C.LEDGE) return true;
   if (cell === C.RUBBLE) return !opts.ghost;
   if (cell === C.PIT) return !opts.flying;
   return false;

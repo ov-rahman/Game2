@@ -57,6 +57,7 @@ export class Renderer {
 
     this.levelMesh = null;
     this.levelGlowMesh = null;
+    this.levelLiquidMesh = null;
     this.creatureMeshes = new Map();
 
     const weapon = buildWeaponMesh();
@@ -158,9 +159,13 @@ export class Renderer {
     if (!g.dungeon) return;
     if (this.levelMesh) this.levelMesh.dispose();
     if (this.levelGlowMesh) this.levelGlowMesh.dispose();
+    if (this.levelLiquidMesh) this.levelLiquidMesh.dispose();
     const built = buildLevelMesh(g.dungeon, g.floorDef);
     this.levelMesh = new Mesh(this.gl, this.world, built.solid, null, VERTEX_LAYOUT);
     this.levelGlowMesh = built.glow.length ? new Mesh(this.gl, this.world, built.glow, null, VERTEX_LAYOUT) : null;
+    this.levelLiquidMesh = built.liquid.length
+      ? new Mesh(this.gl, this.world, built.liquid, null, VERTEX_LAYOUT)
+      : null;
     this.atlasTex = this.atlasFor(g.floorDef);
   }
 
@@ -362,13 +367,22 @@ export class Renderer {
     w.float('uEmissivePulse', 0);
     this.levelMesh.draw();
 
+    if (this.levelLiquidMesh) {
+      // Lava reads as hot because of what it does to the room, not because it
+      // is white. Kept well below the crystals so a pool never becomes the
+      // brightest thing on screen.
+      w.vec3('uEmissive', 0.36, 0.31, 0.27);
+      w.float('uEmissivePulse', 1);
+      this.levelLiquidMesh.draw();
+    }
+
     if (this.levelGlowMesh) {
       w.vec3('uEmissive', 0.85, 0.78, 0.7);
       w.float('uEmissivePulse', 1);
       this.levelGlowMesh.draw();
-      w.vec3('uEmissive', 0, 0, 0);
-      w.float('uEmissivePulse', 0);
     }
+    w.vec3('uEmissive', 0, 0, 0);
+    w.float('uEmissivePulse', 0);
 
     // --- creatures and props ---------------------------------------------
     this.drawEntities(w, g, alpha, cam);
