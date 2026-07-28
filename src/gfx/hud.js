@@ -22,17 +22,40 @@ export class HudPainter {
     this.time = 0;
   }
 
+  /**
+   * Draw a line of interface text.
+   *
+   * Three things keep small type legible once the post pass has had its way
+   * with it: whole-pixel positions, so glyph stems land on pixels instead of
+   * straddling two; a full outline rather than a drop shadow, so a letter keeps
+   * its shape against a bright wall as well as a dark one; and a floor on the
+   * size, because below about eight pixels monospace stops being letterforms
+   * and starts being grey.
+   */
   text(str, x, y, opts = {}) {
     const ctx = this.ctx;
-    ctx.font = `${opts.weight || ''} ${opts.size || 8}px ${FONT}`.trim();
+    const size = Math.max(8, opts.size || 9);
+    ctx.font = `${opts.weight || 'bold'} ${size}px ${FONT}`.trim();
     ctx.textAlign = opts.align || 'left';
     ctx.textBaseline = opts.baseline || 'alphabetic';
+    const px = Math.round(x);
+    const py = Math.round(y);
     if (opts.shadow !== false) {
-      ctx.fillStyle = 'rgba(0,0,0,0.85)';
-      ctx.fillText(str, x + 1, y + 1);
+      ctx.fillStyle = 'rgba(0,0,0,0.9)';
+      ctx.fillText(str, px - 1, py);
+      ctx.fillText(str, px + 1, py);
+      ctx.fillText(str, px, py - 1);
+      ctx.fillText(str, px, py + 1);
     }
-    ctx.fillStyle = opts.color || '#d8e4d0';
-    ctx.fillText(str, x, y);
+    ctx.fillStyle = opts.color || '#e6f0e0';
+    ctx.fillText(str, px, py);
+  }
+
+  /** Dark plate behind a block of text; the cheapest legibility there is. */
+  plate(x, y, w, h, alpha = 0.55) {
+    const ctx = this.ctx;
+    ctx.fillStyle = `rgba(6,8,7,${alpha})`;
+    ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
   }
 
   paint(time) {
@@ -72,11 +95,16 @@ export class HudPainter {
 
     this.paintCrosshair();
 
+    // A single plate under the whole left cluster. Individual plates behind
+    // each bar left the labels sitting on raw world pixels, which is where
+    // small type goes to die.
+    this.plate(4, RENDER_H - 42, 152, 40, 0.42);
+
     // --- health -----------------------------------------------------------
     const barW = 78;
     const barH = 5;
     const bx = 10;
-    const by = RENDER_H - 20;
+    const by = RENDER_H - 22;
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
     const hpFrac = clamp(p.hp / p.stats.maxHp, 0, 1);
@@ -95,29 +123,32 @@ export class HudPainter {
 
     // --- torch battery ----------------------------------------------------
     const tw = 52;
-    const ty = RENDER_H - 11;
+    const ty = RENDER_H - 10;
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(bx - 1, ty - 1, tw + 2, 4);
+    ctx.fillRect(bx - 1, ty - 1, tw + 2, 5);
     const charge = clamp(g.torch.charge, 0, 1);
     ctx.fillStyle = charge > 0.3 ? '#d8d08a' : charge > 0.12 ? '#e0a24a' : '#e4543f';
-    ctx.fillRect(bx, ty, tw * charge, 2);
-    this.text(g.torch.on ? 'ФОНАРЬ' : 'ВЫКЛ', bx + tw + 5, ty + 3, {
-      size: 6,
-      color: g.torch.on ? '#c8c090' : '#6a6a60',
+    ctx.fillRect(bx, ty, tw * charge, 3);
+    this.text(g.torch.on ? 'ФОНАРЬ' : 'ВЫКЛ', bx + tw + 6, ty + 4, {
+      color: g.torch.on ? '#e0d8a8' : '#8a8a80',
     });
 
     // --- ammo / heat ------------------------------------------------------
     const heat = clamp(p.heat, 0, 1);
     const hx = RENDER_W - 62;
+    this.plate(hx - 6, by - 16, 68, 26, 0.42);
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(hx - 1, by - 1, 52 + 2, barH + 2);
     ctx.fillStyle = p.overheated ? '#e4543f' : heat > 0.7 ? '#e8a04a' : '#7fb8e8';
     ctx.fillRect(hx, by, 52 * (1 - heat), barH);
-    this.text(p.overheated ? 'ПЕРЕГРЕВ' : 'ЗАРЯД', hx, by - 4, { size: 6, color: '#9fb0a8' });
+    this.text(p.overheated ? 'ПЕРЕГРЕВ' : 'ЗАРЯД', hx, by - 5, {
+      color: p.overheated ? '#ffb4a4' : '#c8d8d0',
+    });
 
     // --- resources --------------------------------------------------------
-    this.text(`◈ ${p.coins}`, RENDER_W - 10, 14, { align: 'right', size: 8, color: '#e8d08a' });
-    this.text(`✦ ${p.inv.items.length}`, RENDER_W - 10, 24, { align: 'right', size: 8, color: '#a8c8e8' });
+    this.plate(RENDER_W - 58, 4, 54, 24, 0.42);
+    this.text(`◈ ${p.coins}`, RENDER_W - 10, 14, { align: 'right', color: '#f0dc98' });
+    this.text(`✦ ${p.inv.items.length}`, RENDER_W - 10, 24, { align: 'right', color: '#b8d4f0' });
 
     // --- active item ------------------------------------------------------
     if (p.inv.activeId) {
@@ -125,15 +156,16 @@ export class HudPainter {
       this.text(
         `[Q] ${p.inv.activeName}${ready ? '' : ` ${p.inv.activeCharge}/${p.inv.activeMax}`}`,
         10,
-        RENDER_H - 28,
-        { size: 6, color: ready ? '#e8d08a' : '#70786e' },
+        RENDER_H - 30,
+        { color: ready ? '#f0dc98' : '#8a9088' },
       );
     }
 
     // --- floor label ------------------------------------------------------
     const def = g.floorDef;
     if (def) {
-      this.text(`${def.index}/5  ${def.name}`, 10, 14, { size: 7, color: '#8fa898' });
+      this.plate(4, 4, 12 + def.name.length * 6, 14, 0.42);
+      this.text(`${def.index}/5  ${def.name}`, 10, 14, { color: '#b0c8ba' });
     }
 
     // --- objective --------------------------------------------------------

@@ -261,6 +261,11 @@ void main() {
   vec2 uv = vUv;
   vec2 px = uv * uResolution;
 
+  // The HUD is sampled from the *undistorted* coordinate. Tearing and roll are
+  // meant to happen to the recording, not to the readout the player relies on.
+  vec4 hud = texture(uHud, vec2(uv.x, 1.0 - uv.y));
+  float hudMask = hud.a;
+
   // --- tape-style horizontal tearing -------------------------------------
   if (uGlitch > 0.001) {
     float band = floor(uv.y * 24.0);
@@ -282,11 +287,12 @@ void main() {
   color.g = texture(uScene, uv).g;
   color.b = texture(uScene, uv - offset).b;
 
-  // --- HUD, composited before the crunch so it gets the same treatment ----
-  // The HUD comes from a 2D canvas, whose origin is top-left; GL samples from
-  // bottom-left, so it has to be flipped here.
-  vec4 hud = texture(uHud, vec2(uv.x, 1.0 - uv.y));
-  color = mix(color, hud.rgb, hud.a);
+  // --- HUD, composited before the crunch so it belongs to the image -------
+  // It still goes through the grade and the quantiser, because an overlay that
+  // skips them floats above the picture instead of sitting in it. What it does
+  // not get is the part of the crunch that destroys eight-pixel glyphs:
+  // scanlines, grain and coarse banding are all held back by hudMask below.
+  color = mix(color, hud.rgb, hudMask);
 
   // --- grade --------------------------------------------------------------
   float lum = dot(color, vec3(0.299, 0.587, 0.114));
@@ -297,24 +303,29 @@ void main() {
 
   // --- scanlines and interference ----------------------------------------
   float scan = 1.0 - uScanline * (0.5 + 0.5 * sin(px.y * 3.14159));
-  color *= scan;
+  color *= mix(scan, 1.0, hudMask);
   float interference = hash(vec2(floor(px.y), floor(uTime * 30.0)));
-  color *= 1.0 - uGlitch * 0.25 * step(0.93, interference);
+  color *= 1.0 - uGlitch * 0.25 * step(0.93, interference) * (1.0 - hudMask);
 
   // --- vignette -----------------------------------------------------------
-  float vig = 1.0 - uVignette * smoothstep(0.18, 0.75, r2);
+  // Held back over the HUD too: the readouts live in the corners, which is
+  // exactly where the vignette is darkest.
+  float vig = 1.0 - uVignette * smoothstep(0.18, 0.75, r2) * (1.0 - hudMask * 0.75);
   color *= vig;
 
   // --- grain --------------------------------------------------------------
   float g = hash(px + vec2(uTime * 61.0, uTime * 37.0)) - 0.5;
-  color += g * uGrain;
+  color += g * uGrain * (1.0 - hudMask * 0.9);
 
   // --- colour quantisation with ordered dithering -------------------------
   // The dither is added *before* flooring, so gradients break into a stable
   // cross-hatch instead of flat bands. This is the signature of the whole look.
-  float threshold = (bayer8(px) - 0.5) * uDither;
+  // Over the HUD the palette opens up and the dither backs off, because a
+  // twelve-step ramp plus a Bayer threshold turns a glyph edge into confetti.
+  float levels = mix(uLevels, 48.0, hudMask);
+  float threshold = (bayer8(px) - 0.5) * uDither * (1.0 - hudMask * 0.85);
   color = clamp(color, 0.0, 1.0);
-  color = floor(color * uLevels + threshold + 0.5) / uLevels;
+  color = floor(color * levels + threshold + 0.5) / levels;
 
   color *= (1.0 - uFade);
   fragColor = vec4(color, 1.0);
