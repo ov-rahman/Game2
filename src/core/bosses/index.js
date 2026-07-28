@@ -8,6 +8,7 @@ import { createBellowsmith } from './bellowsmith.js';
 import { createIgnarok } from './ignarok.js';
 import { createChromadrake } from './chromadrake.js';
 import { updateStatus } from '../entities/enemy.js';
+import { groundAt } from '../world/terrain.js';
 
 const FACTORIES = {
   leshy: createLeshy,
@@ -34,6 +35,9 @@ export function updateBoss(game, b, dt) {
   if (b.stun > 0) b.stun -= dt * 3;
   const slow = b.frozen > 0 ? 0.65 : 1;
   b.update(game, b, dt * slow);
+  // Bosses stand on the relief like everything else; flyers hover above it.
+  const ground = groundAt(game.dungeon.terrain, b.x, b.z);
+  b.y = b.flying ? ground + 1.2 : ground;
   if (b.light) {
     b.light.x = b.x;
     b.light.y = b.y + b.height * 0.5;

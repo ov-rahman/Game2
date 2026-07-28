@@ -8,6 +8,7 @@ import { PLAYER, CELL, C, TEAM } from '../constants.js';
 import { createInventory, recomputeStats, runHook, useActive } from '../items/inventory.js';
 import { fireVolley } from '../items/shots.js';
 import { moveBody, cellAtWorld } from '../world/collision.js';
+import { groundAt } from '../world/terrain.js';
 import { clamp, lerp, dist2d } from '../math3.js';
 
 const MAX_PITCH = Math.PI / 2 - 0.06;
@@ -132,6 +133,11 @@ export function updatePlayer(game, p, dt, input) {
   if (Math.abs(p.vz) < 0.02) p.vz = 0;
 
   moveBody(game.dungeon.cells, p, p.vx * dt, p.vz * dt, {});
+
+  // Stand on the terrain. Sampled after the move, and eased rather than snapped
+  // so that clipping a corner of a steep triangle does not jolt the camera.
+  const ground = groundAt(game.dungeon.terrain, p.x, p.z);
+  p.y = Math.abs(ground - p.y) > 1.2 ? ground : lerp(p.y, ground, Math.min(1, dt * 22));
 
   // ---- head bob and eye height ----------------------------------------
   const moveSpeedNow = Math.hypot(p.vx, p.vz);

@@ -7,6 +7,8 @@
  * walk through from ever disagreeing.
  */
 import { GRID_W, GRID_H, CELL, C, isOpen } from '../constants.js';
+import { buildTerrain, groundAt } from './terrain.js';
+import { decorFor } from '../../data/decor.js';
 
 export const ROOM_KIND = {
   START: 'start',
@@ -154,6 +156,21 @@ export function generateDungeon(rng, floorDef) {
     candidates[i].cleared = true;
   }
 
+  // ---- room styles -----------------------------------------------------
+  // The masonry a room is built from. Neighbours are pushed apart in the style
+  // list so that walking through a door usually changes what the walls are made
+  // of — the single cheapest way to stop a floor feeling like one long room.
+  const decor = decorFor(floorDef);
+  const styles = decor.styles;
+  for (const r of rooms) {
+    let pick = rng.int(0, styles.length - 1);
+    let guardS = 0;
+    while (guardS++ < 6 && r.links.some((id) => rooms[id].style === styles[pick])) {
+      pick = (pick + 1) % styles.length;
+    }
+    r.style = styles[pick];
+  }
+
   // ---- decorate --------------------------------------------------------
   for (const r of rooms) {
     if (r.kind === ROOM_KIND.START || r.kind === ROOM_KIND.SHOP) continue;
@@ -181,6 +198,21 @@ export function generateDungeon(rng, floorDef) {
       const by = rng.int(r.y + 1, r.y + r.h - 2);
       if (cells[idx(bx, by)] !== C.FLOOR) continue;
       cells[idx(bx, by)] = C.RUBBLE;
+    }
+
+    // Rock columns. Confined to the interior of the room rectangle, which is
+    // what makes them safe: corridors attach at the border ring, so a column
+    // can never seal an exit, and there is always a way round it.
+    if (r.w >= 5 && r.h >= 5) {
+      const columns = Math.round((r.w * r.h) / 34) + rng.int(0, 1);
+      for (let c = 0; c < columns; c++) {
+        const px = rng.int(r.x + 1, r.x + r.w - 2);
+        const py = rng.int(r.y + 1, r.y + r.h - 2);
+        if (cells[idx(px, py)] !== C.FLOOR) continue;
+        // Two columns side by side would make a wall stub; keep them apart.
+        if (nearPillar(cells, px, py)) continue;
+        cells[idx(px, py)] = C.PILLAR;
+      }
     }
   }
 
@@ -262,7 +294,7 @@ export function generateDungeon(rng, floorDef) {
 
   const start = rooms[0].world();
 
-  return {
+  const dungeon = {
     def: floorDef,
     cells,
     roomAt,
@@ -274,10 +306,61 @@ export function generateDungeon(rng, floorDef) {
     width: GRID_W,
     height: GRID_H,
   };
+
+  // Relief last: it reads the finished grid, and everything that stands on the
+  // ground needs it, so it has to exist before the first tick.
+  dungeon.terrain = buildTerrain(rng.fork('terrain'), dungeon, floorDef);
+
+  // Lift the fixtures onto the ground they actually sit on.
+  stairs.y = groundAt(dungeon.terrain, stairs.x, stairs.z);
+  for (const l of lights) l.y += groundAt(dungeon.terrain, l.x, l.z);
+
+  // Glowing decoration lights the room it stands in. Marked room -2 so the mesh
+  // builder does not also hang a crystal on it — it already is one.
+  const propLights = [];
+  for (const pr of dungeon.terrain.props) {
+    if (!pr.lit || !pr.color) continue;
+    // One light per patch. Two glowing clumps three metres apart light the same
+    // wall twice and cost twice as much, so the second one does not get to.
+    let crowded = false;
+    for (const o of propLights) {
+      if (Math.abs(o.x - pr.x) < 7 && Math.abs(o.z - pr.z) < 7) { crowded = true; break; }
+    }
+    if (crowded) continue;
+    propLights.push(pr);
+    lights.push({
+      x: pr.x,
+      y: pr.y + (pr.kind === 'sconce' ? 0.1 : pr.h * 0.7 + 0.1),
+      z: pr.z,
+      r: pr.color[0],
+      g: pr.color[1],
+      b: pr.color[2],
+      radius: pr.kind === 'sconce' ? 9 : 5.5,
+      intensity: pr.kind === 'sconce' ? 1.5 : 0.75,
+      flicker: pr.kind === 'sconce' ? rng.range(5, 10) : 0,
+      phase: rng.angle(),
+      room: -2,
+    });
+  }
+
+  dungeon.corridorStyle = decor.corridor;
+
+  return dungeon;
 }
 
 function inside(x, y) {
   return x >= 1 && y >= 1 && x < GRID_W - 1 && y < GRID_H - 1;
+}
+
+/** Is there already a column within one cell, diagonals included? */
+function nearPillar(cells, gx, gy) {
+  for (let y = gy - 1; y <= gy + 1; y++) {
+    for (let x = gx - 1; x <= gx + 1; x++) {
+      if (!inside(x, y)) continue;
+      if (cells[idx(x, y)] === C.PILLAR) return true;
+    }
+  }
+  return false;
 }
 
 function carveCorridor(cells, rng, a, b, floorDef) {

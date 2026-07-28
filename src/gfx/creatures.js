@@ -427,3 +427,45 @@ const FORMS = {
 };
 
 export { FORMS as CREATURE_FORMS };
+
+/**
+ * The held weapon, built with the same primitives as the monsters.
+ *
+ * Modelled in view space: +X right, +Y up, +Z *forward into the screen*, with
+ * the origin at the player's hand. The renderer places it directly in front of
+ * the camera and never depth-tests it against the world, so it can never clip
+ * into a wall.
+ */
+export function buildWeaponMesh() {
+  const body = new MeshBuilder(600);
+  const glow = new MeshBuilder(120);
+  const uv = tileUV(TILE.METAL);
+  const uvGlow = tileUV(TILE.GLOW);
+
+  const steel = [0.62, 0.66, 0.72];
+  const dark = [0.3, 0.32, 0.36];
+  const brass = [0.75, 0.6, 0.32];
+  const core = [0.45, 0.9, 1.0];
+
+  // Grip, angled back toward the hand.
+  body.box(0, -0.09, 0, 0.058, 0.13, 0.05, uv, dark);
+  // Receiver.
+  body.box(0, 0, 0.06, 0.07, 0.075, 0.2, uv, steel);
+  // Barrel shroud with vents.
+  body.box(0, 0.008, 0.24, 0.05, 0.05, 0.22, uv, dark);
+  for (let i = 0; i < 3; i++) {
+    body.box(0, 0.04, 0.18 + i * 0.06, 0.055, 0.012, 0.022, uv, brass);
+  }
+  // Emitter ring at the muzzle.
+  body.prism(0, -0.03, 0.35, 8, 0.045, 0.038, 0.06, uv, brass);
+  // Top rail and rear sight.
+  body.box(0, 0.045, 0.1, 0.03, 0.014, 0.16, uv, brass);
+  body.box(0, 0.062, 0.03, 0.022, 0.02, 0.02, uv, steel);
+
+  // Charge core: the one part that reads at a glance, and the part the HUD
+  // heat bar is describing.
+  glow.box(0, 0.012, 0.1, 0.026, 0.026, 0.07, uvGlow, core);
+  glow.prism(0, -0.03, 0.36, 8, 0.03, 0.026, 0.012, uvGlow, core);
+
+  return { solid: body.finish(), glow: glow.finish() };
+}

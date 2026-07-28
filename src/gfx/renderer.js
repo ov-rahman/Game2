@@ -25,7 +25,7 @@ import { Program, Mesh, DynamicMesh, RenderTarget, textureFromCanvas, updateText
 import { WORLD_VS, WORLD_FS, BILLBOARD_VS, BILLBOARD_FS, POST_VS, POST_FS, MAX_LIGHTS } from './shaders.js';
 import { buildAtlas, buildSpriteSheet, spriteUV, SPRITE } from './textures.js';
 import { buildLevelMesh, VERTEX_LAYOUT } from './meshbuild.js';
-import { buildCreatureMesh } from './creatures.js';
+import { buildCreatureMesh, buildWeaponMesh } from './creatures.js';
 import { HudPainter } from './hud.js';
 
 const BILLBOARD_LAYOUT = [
@@ -58,6 +58,11 @@ export class Renderer {
     this.levelMesh = null;
     this.levelGlowMesh = null;
     this.creatureMeshes = new Map();
+
+    const weapon = buildWeaponMesh();
+    this.weaponMesh = new Mesh(gl, this.world, weapon.solid, null, VERTEX_LAYOUT);
+    this.weaponGlowMesh = new Mesh(gl, this.world, weapon.glow, null, VERTEX_LAYOUT);
+    this.weaponSway = { x: 0, y: 0 };
 
     this.sprites = new DynamicMesh(gl, this.billboard, 6 * 1400 * BILLBOARD_FLOATS, BILLBOARD_LAYOUT);
 
@@ -368,11 +373,74 @@ export class Renderer {
     // --- creatures and props ---------------------------------------------
     this.drawEntities(w, g, alpha, cam);
 
+    // --- viewmodel --------------------------------------------------------
+    this.drawWeapon(w, g, cam, frameDt);
+
     // --- billboards -------------------------------------------------------
     this.drawSprites(g, cam, alpha);
 
     // --- post -------------------------------------------------------------
     this.drawPost(frameDt);
+  }
+
+  /**
+   * The held weapon. Drawn with the depth buffer cleared so it always sits on
+   * top of the world, and positioned relative to the camera basis rather than
+   * in world space, which keeps it rock-steady while the level wobbles.
+   */
+  drawWeapon(w, g, cam, frameDt) {
+    const gl = this.gl;
+    const p = g.player;
+    if (p.dead) return;
+
+    // Sway lags the aim: the weapon catches up to where you are looking.
+    const targetX = clamp(-g.lookDeltaX * 6, -0.05, 0.05);
+    const targetY = clamp(g.lookDeltaY * 6, -0.05, 0.05);
+    this.weaponSway.x = lerp(this.weaponSway.x, targetX, Math.min(1, frameDt * 9));
+    this.weaponSway.y = lerp(this.weaponSway.y, targetY, Math.min(1, frameDt * 9));
+
+    const bob = Math.sin(p.bobPhase * 2) * p.bobAmount * 1.4;
+    const bobX = Math.cos(p.bobPhase) * p.bobAmount * 1.6;
+    const recoil = p.recoil;
+
+    // Camera basis.
+    const cp = Math.cos(cam.pitch);
+    const fx = Math.sin(cam.yaw) * cp;
+    const fy = -Math.sin(cam.pitch);
+    const fz = Math.cos(cam.yaw) * cp;
+    const rx = -Math.cos(cam.yaw);
+    const rz = Math.sin(cam.yaw);
+    const ux = Math.sin(cam.yaw) * Math.sin(cam.pitch);
+    const uy = Math.cos(cam.pitch);
+    const uz = Math.cos(cam.yaw) * Math.sin(cam.pitch);
+
+    const offR = 0.16 + this.weaponSway.x + bobX;
+    const offU = -0.17 + this.weaponSway.y + bob - (p.overheated ? 0.06 : 0);
+    const offF = 0.3 - recoil * 0.12;
+
+    const px = cam.x + rx * offR + ux * offU + fx * offF;
+    const py = cam.y + uy * offU + fy * offF;
+    const pz = cam.z + rz * offR + uz * offU + fz * offF;
+
+    // Build the model matrix directly from the camera basis: columns are
+    // right, up, forward, translation.
+    const m = this.model;
+    m[0] = rx; m[1] = 0; m[2] = rz; m[3] = 0;
+    m[4] = ux; m[5] = uy; m[6] = uz; m[7] = 0;
+    m[8] = fx; m[9] = fy; m[10] = fz; m[11] = 0;
+    m[12] = px; m[13] = py; m[14] = pz; m[15] = 1;
+
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    w.mat4('uModel', m);
+    w.vec4('uTintFlash', 1, 0.3, 0.2, p.overheated ? 0.35 : 0);
+    this.weaponMesh.draw();
+    const heat = clamp(p.heat, 0, 1);
+    w.vec3('uEmissive', 0.6 + heat * 2.2, 0.9 - heat * 0.5, 1.3 - heat * 1.0);
+    w.float('uEmissivePulse', 1);
+    this.weaponGlowMesh.draw();
+    w.vec3('uEmissive', 0, 0, 0);
+    w.float('uEmissivePulse', 0);
+    w.vec4('uTintFlash', 1, 0.15, 0.12, g.damageFlash() * 0.16);
   }
 
   uploadLights(w, cam) {

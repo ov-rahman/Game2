@@ -7,6 +7,7 @@ import { creatureArt } from '../../data/creature-art.js';
 import { getBehavior } from '../ai/behaviors.js';
 import { C } from '../constants.js';
 import { cellAtWorld } from '../world/collision.js';
+import { groundAt } from '../world/terrain.js';
 
 let nextId = 1;
 
@@ -184,12 +185,10 @@ export function updateEnemy(game, e, dt) {
   e.behavior(game, e, dt);
   e.speed = backup;
 
-  // Flyers hover; walkers hug the floor.
-  if (e.flying) {
-    e.y = 0.6 + Math.sin(e.t * 1.7) * 0.12;
-  } else {
-    e.y = 0;
-  }
+  // Flyers hover; walkers hug the floor. Both are measured from the terrain,
+  // so nothing sinks into a rise or floats over a hollow.
+  const ground = groundAt(game.dungeon.terrain, e.x, e.z);
+  e.y = e.flying ? ground + 0.6 + Math.sin(e.t * 1.7) * 0.12 : ground;
 
   if (e.light) {
     e.light.x = e.x;

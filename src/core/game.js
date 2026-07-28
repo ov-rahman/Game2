@@ -20,6 +20,7 @@ import {
 import { Rng } from './rng.js';
 import { EventBus } from './events.js';
 import { generateDungeon, ROOM_KIND, cellAtWorld, roomAtWorld } from './world/dungeongen.js';
+import { groundAt } from './world/terrain.js';
 import { NavField } from './world/nav.js';
 import { blocked, findFreeSpot, hasLineOfSight, raycast } from './world/collision.js';
 import { ShotPool } from './entities/projectile.js';
@@ -103,6 +104,9 @@ export class Game {
     this.loopStats = null;
     this.packToken = { holder: null, t: 0 };
     this.bossActive = false;
+    // Smoothed look delta, read by the renderer for weapon sway.
+    this.lookDeltaX = 0;
+    this.lookDeltaY = 0;
 
     this.stats = this.freshStats();
     this.seenItems = new Set();
@@ -179,6 +183,7 @@ export class Game {
     this.player.z = this.dungeon.start.z;
     this.player.px = this.player.x;
     this.player.pz = this.player.z;
+    this.player.y = groundAt(this.dungeon.terrain, this.player.x, this.player.z);
     this.player.vx = this.player.vz = 0;
     this.player.wardUsed = false;
     if (this.player.flags.reviveRefresh) this.player.reviveUsed = false;
@@ -306,7 +311,7 @@ export class Game {
   }
 
   addProp(p) {
-    p.y = p.type === 'pickup' ? 0.55 : 0.8;
+    p.y = groundAt(this.dungeon.terrain, p.x, p.z) + (p.type === 'pickup' ? 0.55 : 0.8);
     p.phase = this.rng.angle();
     p.scale = p.type === 'pedestal' ? 0.8 : 0.5;
     p.art = p.type === 'pickup' ? 'lantern' : p.type === 'shop' ? 'lantern' : 'prismSprite';
@@ -412,6 +417,9 @@ export class Game {
     const sdt = dt * this.timeScale;
 
     this.updateTimers(dt);
+
+    this.lookDeltaX = lerp(this.lookDeltaX, input.look.dx, 0.35);
+    this.lookDeltaY = lerp(this.lookDeltaY, input.look.dy, 0.35);
 
     if (!this.player.dead) updatePlayer(this, this.player, sdt, input);
 

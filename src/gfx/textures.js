@@ -14,27 +14,51 @@ import { SPRITE, SPRITE_SIZE, SPRITE_COLS, spriteUV } from '../data/sprite-ids.j
 export { SPRITE, SPRITE_SIZE, SPRITE_COLS, spriteUV };
 
 export const ATLAS_TILE = 64;
-export const ATLAS_COLS = 4;
+export const ATLAS_COLS = 8;
 export const ATLAS_SIZE = ATLAS_TILE * ATLAS_COLS;
 
-/** Tile slots inside the atlas. */
+/**
+ * Tile slots inside the atlas.
+ *
+ * Half of these exist for one reason: so that two rooms on the same floor can
+ * be built out of visibly different masonry. A dungeon where every wall is the
+ * same brick is a dungeon with one room in it, repeated.
+ */
 export const TILE = {
+  // floors
   FLOOR: 0,
   FLOOR_ALT: 1,
-  WALL: 2,
-  WALL_ALT: 3,
-  CEILING: 4,
-  RUBBLE: 5,
-  HAZARD: 6,
-  TRIM: 7,
-  STAIRS: 8,
-  PANEL: 9,
-  GRATE: 10,
-  CRYSTAL: 11,
-  FLESH: 12,
-  METAL: 13,
-  BONE: 14,
-  GLOW: 15,
+  FLOOR_COBBLE: 2,
+  FLOOR_TILED: 3,
+  FLOOR_PLANK: 4,
+  // walls: six distinct masonries
+  WALL: 5, // running brick
+  WALL_ALT: 6, // big ashlar blocks
+  WALL_ROUGH: 7, // undressed stone
+  WALL_TILED: 8, // small square tile
+  WALL_CRACKED: 9, // ruined brick
+  WALL_RIB: 10, // ribbed / pilastered
+  // ceilings
+  CEILING: 11,
+  CEIL_VAULT: 12,
+  // fixtures
+  RUBBLE: 13,
+  HAZARD: 14,
+  TRIM: 15,
+  STAIRS: 16,
+  PANEL: 17,
+  GRATE: 18,
+  CRYSTAL: 19,
+  FLESH: 20,
+  METAL: 21,
+  BONE: 22,
+  GLOW: 23,
+  // dressing
+  MOSS: 24,
+  WOOD: 25,
+  MUSHROOM: 26,
+  ROCK: 27,
+  MORTAR: 28,
 };
 
 /** UV rect for a tile slot, inset half a texel to stop neighbour bleed. */
@@ -196,6 +220,266 @@ function paintWallTile(ctx, T, pal, seed, alt) {
   grain(ctx, 0, 0, T, T, shade(pal.wall, -0.2), 0.07, seed + 21, 0.45);
   grain(ctx, 0, 0, T, T, shade(pal.wall, 0.12), 0.025, seed + 29, 0.35);
   if (alt) cracks(ctx, 0, 0, T, T, shade(pal.wall, -0.26), 3, seed + 31, 1.4);
+}
+
+/**
+ * Generic masonry painter. Every wall variant is this function with different
+ * course geometry, so they share a lighting model and read as one dungeon
+ * built by different hands rather than as five unrelated textures.
+ */
+function masonry(ctx, T, base, seed, opts) {
+  const r = rnd(seed);
+  const rows = opts.rows;
+  const cols = opts.cols;
+  const rh = T / rows;
+  const cw = T / cols;
+  const mortar = shade(base, opts.mortar == null ? -0.24 : opts.mortar);
+
+  ctx.fillStyle = mortar;
+  ctx.fillRect(0, 0, T, T);
+
+  const gap = opts.gap == null ? 2 : opts.gap;
+  for (let i = 0; i < rows; i++) {
+    const y = i * rh;
+    const off = opts.stagger ? (i % 2 === 0 ? 0 : cw / 2) : 0;
+    for (let j = -1; j <= cols; j++) {
+      const x = off + j * cw;
+      // Each stone gets its own value so a wall never looks stamped.
+      const v = (r() - 0.5) * (opts.variance == null ? 0.12 : opts.variance);
+      ctx.fillStyle = shade(base, v);
+      ctx.fillRect(x + gap / 2, y + gap / 2, cw - gap, rh - gap);
+      // Top bevel catches the torch; bottom edge falls into shadow.
+      ctx.fillStyle = shade(base, v + 0.08);
+      ctx.fillRect(x + gap / 2, y + gap / 2, cw - gap, 1);
+      ctx.fillStyle = shade(base, v - 0.13);
+      ctx.fillRect(x + gap / 2, y + rh - gap / 2 - 1, cw - gap, 1);
+    }
+  }
+  grain(ctx, 0, 0, T, T, shade(base, -0.22), 0.07, seed + 21, 0.45);
+  grain(ctx, 0, 0, T, T, shade(base, 0.12), 0.025, seed + 29, 0.3);
+  if (opts.cracked) cracks(ctx, 0, 0, T, T, shade(base, -0.3), 5, seed + 31, 1.5);
+  if (opts.chips) {
+    // Missing corners: the difference between "old" and "just dark".
+    for (let i = 0; i < opts.chips; i++) {
+      const x = r() * T;
+      const y = r() * T;
+      const w = 3 + r() * 9;
+      ctx.fillStyle = shade(base, -0.3);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y + w * 0.4);
+      ctx.lineTo(x + w * 0.5, y + w);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  if (opts.moss) {
+    const g = rnd(seed + 77);
+    ctx.globalAlpha = 0.32;
+    ctx.fillStyle = pal_moss_color(base, opts.moss);
+    for (let i = 0; i < 40; i++) {
+      const x = g() * T;
+      const y = T - g() * g() * T; // gathers along the bottom, like damp
+      ctx.fillRect(x, y, 2 + g() * 4, 2 + g() * 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function pal_moss_color(base, tone) {
+  return mix(base, tone, 0.75);
+}
+
+function paintWallRough(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  ctx.fillStyle = shade(pal.wall, -0.2);
+  ctx.fillRect(0, 0, T, T);
+  // Undressed stone: irregular polygons packed edge to edge.
+  for (let i = 0; i < 26; i++) {
+    const x = r() * T;
+    const y = r() * T;
+    const s = 8 + r() * 16;
+    ctx.fillStyle = shade(pal.wall, (r() - 0.45) * 0.24);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + s, y + s * (0.2 + r() * 0.3));
+    ctx.lineTo(x + s * (0.5 + r() * 0.4), y + s);
+    ctx.lineTo(x - s * 0.25, y + s * 0.7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = shade(pal.wall, -0.3);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  grain(ctx, 0, 0, T, T, '#000000', 0.09, seed + 13, 0.32);
+}
+
+function paintWallRib(ctx, T, pal, seed) {
+  masonry(ctx, T, pal.wall, seed, { rows: 6, cols: 3, stagger: false, variance: 0.08 });
+  // Vertical pilasters: the one wall that gives a room a sense of direction.
+  ctx.fillStyle = shade(pal.wall, 0.05);
+  ctx.fillRect(T * 0.1, 0, T * 0.12, T);
+  ctx.fillRect(T * 0.78, 0, T * 0.12, T);
+  ctx.fillStyle = shade(pal.wall, 0.14);
+  ctx.fillRect(T * 0.1, 0, 2, T);
+  ctx.fillRect(T * 0.78, 0, 2, T);
+  ctx.fillStyle = shade(pal.wall, -0.2);
+  ctx.fillRect(T * 0.1 + T * 0.12 - 2, 0, 2, T);
+  ctx.fillRect(T * 0.78 + T * 0.12 - 2, 0, 2, T);
+  grain(ctx, 0, 0, T, T, '#000000', 0.06, seed + 17, 0.3);
+}
+
+function paintCobbleTile(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  ctx.fillStyle = shade(pal.floor, -0.2);
+  ctx.fillRect(0, 0, T, T);
+  const step = T / 7;
+  for (let gy = 0; gy < 7; gy++) {
+    for (let gx = 0; gx < 7; gx++) {
+      const x = gx * step + (gy % 2 ? step * 0.5 : 0);
+      const y = gy * step;
+      ctx.fillStyle = shade(pal.floor, (r() - 0.4) * 0.22);
+      ctx.beginPath();
+      ctx.ellipse(x + step / 2, y + step / 2, step * 0.42, step * 0.36, r() * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  grain(ctx, 0, 0, T, T, '#000000', 0.1, seed + 61, 0.3);
+}
+
+function paintTiledFloor(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  ctx.fillStyle = shade(pal.floor, -0.22);
+  ctx.fillRect(0, 0, T, T);
+  // Diagonal chequer: instantly reads as "someone built this room".
+  const n = 4;
+  const s2 = T / n;
+  for (let gy = 0; gy < n; gy++) {
+    for (let gx = 0; gx < n; gx++) {
+      const light = (gx + gy) % 2 === 0;
+      ctx.fillStyle = shade(light ? pal.floor : mix(pal.floor, pal.accent, 0.18), (r() - 0.5) * 0.07);
+      ctx.fillRect(gx * s2 + 1, gy * s2 + 1, s2 - 2, s2 - 2);
+    }
+  }
+  cracks(ctx, 0, 0, T, T, shade(pal.floor, -0.3), 3, seed + 5, 1);
+  grain(ctx, 0, 0, T, T, '#000000', 0.07, seed + 71, 0.26);
+}
+
+function paintPlankTile(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  const wood = mix(pal.wall, '#6b4a28', 0.55);
+  ctx.fillStyle = shade(wood, -0.16);
+  ctx.fillRect(0, 0, T, T);
+  const planks = 5;
+  const ph = T / planks;
+  for (let i = 0; i < planks; i++) {
+    ctx.fillStyle = shade(wood, (r() - 0.5) * 0.14);
+    ctx.fillRect(0, i * ph + 1, T, ph - 2);
+    ctx.strokeStyle = shade(wood, -0.1);
+    ctx.lineWidth = 1;
+    for (let g = 0; g < 3; g++) {
+      const y = i * ph + 2 + r() * (ph - 4);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.bezierCurveTo(T * 0.3, y + (r() - 0.5) * 3, T * 0.7, y + (r() - 0.5) * 3, T, y);
+      ctx.stroke();
+    }
+  }
+  grain(ctx, 0, 0, T, T, '#000000', 0.06, seed + 83, 0.28);
+}
+
+function paintVaultTile(ctx, T, pal, seed) {
+  ctx.fillStyle = shade(pal.wall, -0.2);
+  ctx.fillRect(0, 0, T, T);
+  // Ribs meeting at the centre: a vaulted ceiling in one 64px tile.
+  ctx.strokeStyle = shade(pal.wall, -0.04);
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(T, T);
+  ctx.moveTo(T, 0);
+  ctx.lineTo(0, T);
+  ctx.stroke();
+  ctx.strokeStyle = shade(pal.wall, -0.32);
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(T / 2, T / 2, T * 0.3, 0, Math.PI * 2);
+  ctx.stroke();
+  grain(ctx, 0, 0, T, T, '#000000', 0.09, seed + 91, 0.34);
+}
+
+function paintMossTile(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  const moss = mix(pal.accent, '#1e3a16', 0.45);
+  ctx.fillStyle = moss;
+  ctx.fillRect(0, 0, T, T);
+  for (let i = 0; i < 90; i++) {
+    ctx.fillStyle = shade(moss, (r() - 0.45) * 0.3);
+    ctx.fillRect(r() * T, r() * T, 2 + r() * 4, 2 + r() * 4);
+  }
+  grain(ctx, 0, 0, T, T, '#000000', 0.08, seed + 101, 0.3);
+}
+
+function paintWoodTile(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  const wood = mix(pal.wall, '#59401f', 0.7);
+  ctx.fillStyle = wood;
+  ctx.fillRect(0, 0, T, T);
+  ctx.strokeStyle = shade(wood, -0.18);
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 7; i++) {
+    const x = (i / 7) * T + r() * 4;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.bezierCurveTo(x + (r() - 0.5) * 6, T * 0.4, x + (r() - 0.5) * 6, T * 0.7, x, T);
+    ctx.stroke();
+  }
+  ctx.fillStyle = shade(wood, 0.1);
+  ctx.fillRect(0, 0, T, 2);
+  grain(ctx, 0, 0, T, T, '#000000', 0.07, seed + 111, 0.3);
+}
+
+function paintMushroomTile(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  const cap = mix(pal.accent, '#ffffff', 0.22);
+  ctx.fillStyle = cap;
+  ctx.fillRect(0, 0, T, T);
+  // Spots. They do all the work of saying "fungus" at eight pixels across.
+  for (let i = 0; i < 16; i++) {
+    ctx.fillStyle = shade(cap, r() > 0.5 ? 0.22 : -0.26);
+    const s2 = 4 + r() * 9;
+    ctx.beginPath();
+    ctx.arc(r() * T, r() * T, s2 / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  grain(ctx, 0, 0, T, T, '#000000', 0.05, seed + 121, 0.22);
+}
+
+function paintRockTile(ctx, T, pal, seed) {
+  const r = rnd(seed);
+  const rock = mix(pal.wall, '#8a8a86', 0.35);
+  ctx.fillStyle = rock;
+  ctx.fillRect(0, 0, T, T);
+  for (let i = 0; i < 20; i++) {
+    ctx.fillStyle = shade(rock, (r() - 0.5) * 0.26);
+    const x = r() * T;
+    const y = r() * T;
+    const s2 = 6 + r() * 14;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + s2, y + s2 * 0.35);
+    ctx.lineTo(x + s2 * 0.45, y + s2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  grain(ctx, 0, 0, T, T, '#000000', 0.11, seed + 131, 0.34);
+}
+
+function paintMortarTile(ctx, T, pal, seed) {
+  ctx.fillStyle = shade(pal.wall, -0.3);
+  ctx.fillRect(0, 0, T, T);
+  grain(ctx, 0, 0, T, T, shade(pal.wall, 0.1), 0.12, seed + 141, 0.35);
+  grain(ctx, 0, 0, T, T, '#000000', 0.1, seed + 143, 0.3);
 }
 
 function paintCeilingTile(ctx, T, pal, seed) {
@@ -388,9 +672,38 @@ function paintGlowTile(ctx, T, pal) {
 const PAINTERS = {
   [TILE.FLOOR]: (c, T, p, s) => paintFloorTile(c, T, p, s, false),
   [TILE.FLOOR_ALT]: (c, T, p, s) => paintFloorTile(c, T, p, s + 1, true),
-  [TILE.WALL]: (c, T, p, s) => paintWallTile(c, T, p, s, false),
-  [TILE.WALL_ALT]: (c, T, p, s) => paintWallTile(c, T, p, s + 2, true),
+  [TILE.FLOOR_COBBLE]: paintCobbleTile,
+  [TILE.FLOOR_TILED]: paintTiledFloor,
+  [TILE.FLOOR_PLANK]: paintPlankTile,
+
+  // Six masonries. A room picks one; that choice is most of what makes two
+  // rooms on the same floor feel like different places.
+  [TILE.WALL]: (c, T, p, s) => masonry(c, T, p.wall, s, { rows: 5, cols: 2, stagger: true, gap: 2 }),
+  [TILE.WALL_ALT]: (c, T, p, s) =>
+    masonry(c, T, shade(p.wall, -0.04), s + 2, { rows: 3, cols: 2, stagger: false, gap: 3, variance: 0.16 }),
+  [TILE.WALL_ROUGH]: paintWallRough,
+  [TILE.WALL_TILED]: (c, T, p, s) =>
+    masonry(c, T, mix(p.wall, p.accent, 0.16), s + 4, { rows: 8, cols: 8, stagger: false, gap: 1.5, variance: 0.1 }),
+  [TILE.WALL_CRACKED]: (c, T, p, s) =>
+    masonry(c, T, shade(p.wall, -0.02), s + 6, {
+      rows: 5,
+      cols: 2,
+      stagger: true,
+      gap: 2.5,
+      variance: 0.2,
+      cracked: true,
+      chips: 7,
+      moss: p.accent,
+    }),
+  [TILE.WALL_RIB]: paintWallRib,
+
   [TILE.CEILING]: paintCeilingTile,
+  [TILE.CEIL_VAULT]: paintVaultTile,
+  [TILE.MOSS]: paintMossTile,
+  [TILE.WOOD]: paintWoodTile,
+  [TILE.MUSHROOM]: paintMushroomTile,
+  [TILE.ROCK]: paintRockTile,
+  [TILE.MORTAR]: paintMortarTile,
   [TILE.RUBBLE]: paintRubbleTile,
   [TILE.HAZARD]: paintHazardTile,
   [TILE.TRIM]: paintTrimTile,

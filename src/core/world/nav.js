@@ -50,7 +50,7 @@ export class NavField {
         const ni = ny * GRID_W + nx;
         if (dist[ni] !== UNREACHABLE) continue;
         const cell = cells[ni];
-        if (cell === C.SOLID || cell === C.RUBBLE || cell === C.PIT) continue;
+        if (cell === C.SOLID || cell === C.RUBBLE || cell === C.PIT || cell === C.PILLAR) continue;
         dist[ni] = nd;
         q[tail++] = ni;
       }

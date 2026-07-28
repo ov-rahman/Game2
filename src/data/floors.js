@@ -24,6 +24,8 @@ export const FLOORS = [
     hazardChance: 0.35,
     pits: false,
     wideCorridors: 0.35,
+    relief: 0.62,
+    scatter: 1.15,
     special: { treasure: 1, shop: 1, challenge: 1 },
 
     tex: {
@@ -84,6 +86,8 @@ export const FLOORS = [
     hazardChance: 0.4,
     pits: true,
     wideCorridors: 0.22,
+    relief: 0.78,
+    scatter: 1.0,
     special: { treasure: 1, shop: 1, challenge: 1 },
 
     tex: {
@@ -144,6 +148,8 @@ export const FLOORS = [
     hazardChance: 0.3,
     pits: true,
     wideCorridors: 0.3,
+    relief: 0.5,
+    scatter: 0.85,
     special: { treasure: 1, shop: 1, challenge: 1 },
 
     tex: {
@@ -204,6 +210,8 @@ export const FLOORS = [
     hazardChance: 0.62,
     pits: false,
     wideCorridors: 0.4,
+    relief: 0.42,
+    scatter: 0.7,
     special: { treasure: 1, shop: 1, challenge: 1 },
 
     tex: {
@@ -264,6 +272,8 @@ export const FLOORS = [
     hazardChance: 0.25,
     pits: true,
     wideCorridors: 0.5,
+    relief: 0.9,
+    scatter: 1.2,
     special: { treasure: 1, shop: 1, challenge: 0 },
 
     // The bright, many-coloured floor: a crystal treasury lit by refracted light.
