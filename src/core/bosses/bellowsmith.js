@@ -1,229 +1,170 @@
 /**
  * Floor 3 boss — Мехокузнец, the forge master.
  *
- * A heavy, positional fight: slow but overwhelming attacks that punish standing
- * anywhere predictable. No lava on this floor, so the pressure comes from
- * shrapnel arcs, the anvil slam and the roaming bellows flame.
+ * A heavy, positional fight. No lava on this floor, so the pressure comes from
+ * shrapnel arcs, dropped anvils and a roaming bellows flame.
  */
 import { TEAM } from '../constants.js';
-import { makeBoss, checkPhase, moveToward, aimAt, radial, fan, bullet, chooseAttack, ARENA, telegraphAt } from './base.js';
-import { clamp } from '../math.js';
+import { makeBoss, checkPhase, toPlayer, moveToward, faceTarget, radial, fan, bullet, chooseAttack, endAttack, groundStrike } from './base.js';
+import { SPRITE } from '../../data/sprite-ids.js';
 
-export function createBellowsmith(game, x, y) {
+export function createBellowsmith(game, x, z) {
   return makeBoss({
     id: 'bellowsmith',
-    name: 'Мехокузнец',
+    name: 'МЕХОКУЗНЕЦ',
     title: 'мастер горна',
-    sprite: 'bellowsmith',
-    x,
-    y,
-    radius: 28,
-    hp: 560,
-    speed: 38,
-    touch: 3,
-    armor: 1,
+    art: 'bellowsmith',
+    x, z,
+    radius: 1.7,
+    hp: 1500,
+    speed: 2.0,
+    touch: 4,
+    armor: 2,
     phaseThresholds: [0.68, 0.34],
     update,
     onPhase(g, b, phase) {
-      if (phase >= 2) {
-        b.mem.heat = true;
-        g.message('Горн разгорается', '', 1.8);
-      }
+      if (phase >= 2) g.message('ГОРН РАЗГОРАЕТСЯ', '', 2);
       if (phase >= 3) {
-        b.speed = 52;
+        b.speed = 2.9;
         g.spawnMinions(b, { id: 'emberling', count: 3, max: 8 });
       }
     },
   });
 }
 
-const ATTACKS_P1 = ['slam', 'shrapnel', 'anvilDrop'];
-const ATTACKS_P2 = ['slam', 'shrapnel', 'flameSweep', 'anvilDrop'];
-const ATTACKS_P3 = ['slam', 'flameSweep', 'forgeStorm', 'anvilDrop'];
+const P1 = ['slam', 'shrapnel', 'anvils'];
+const P2 = ['slam', 'shrapnel', 'flameSweep', 'anvils'];
+const P3 = ['slam', 'flameSweep', 'forgeStorm', 'anvils'];
 
 function update(game, b, dt) {
   b.t += dt;
   checkPhase(game, b);
+  const t = toPlayer(game, b);
 
   if (b.attack) {
     b.attackT += dt;
-    runAttack(game, b, dt);
+    runAttack(game, b, dt, t);
     return;
   }
-
   b.cd -= dt;
-  moveToward(b, game.player.x, game.player.y, b.speed, dt);
-  if (b.mem.heat && game.rng.chance(dt * 8)) {
-    game.fx('ember', { x: b.x + game.rng.range(-14, 14), y: b.y - 10, color: '#ff9d3c' });
+  moveToward(game, b, t.p.x, t.p.z, b.speed, dt);
+  if (game.rng.chance(dt * 6)) {
+    game.fx('ember', { x: b.x + game.rng.range(-1, 1), y: b.y + 1.6, z: b.z, color: [1, 0.6, 0.2] });
   }
-  if (b.cd <= 0) {
-    const list = b.phase === 1 ? ATTACKS_P1 : b.phase === 2 ? ATTACKS_P2 : ATTACKS_P3;
-    chooseAttack(game, b, list);
-  }
+  if (b.cd <= 0) chooseAttack(game, b, b.phase === 1 ? P1 : b.phase === 2 ? P2 : P3);
 }
 
-function runAttack(game, b, dt) {
+function runAttack(game, b, dt, t) {
   const T = b.attackT;
-  const p = game.player;
-
   switch (b.attack) {
-    // Hammer slam: a wide shockwave plus a shrapnel ring.
     case 'slam': {
-      if (T < 0.75) {
-        b.ai.telegraph = 1 - T / 0.75;
-        if (T < dt * 2) telegraphAt(game, b.x, b.y, 0.75, 92, '#ff9d3c');
-        moveToward(b, p.x, p.y, 22, dt);
+      if (T < 0.8) {
+        b.telegraph = 1 - T / 0.8;
+        moveToward(game, b, t.p.x, t.p.z, 1.0, dt);
+        if (T < dt * 2) {
+          game.fx('telegraph', { x: b.x, y: 0.1, z: b.z, radius: 5.5, time: 0.8, color: [1, 0.6, 0.2] });
+        }
         break;
       }
       if (!b.mem.slammed) {
         b.mem.slammed = true;
-        b.ai.telegraph = 0;
-        game.spawnShockwave(b.x, b.y, { radius: 92, damage: 2, team: TEAM.ENEMY, color: '#ff9d3c' });
-        game.shake(10, 0.35);
-        game.sfx('bossSlam');
-        radial(game, b, b.phase >= 2 ? 12 : 8, {
-          speed: 145,
-          damage: 1,
-          color: '#ffc08a',
-          radius: 5,
-          style: 'shrapnel',
-        });
+        b.telegraph = 0;
+        game.explode(b.x, b.y + 0.5, b.z, 5.5, 4, TEAM.ENEMY);
+        game.shake(1.5, 0.4);
+        game.sfx('bossSlam', { x: b.x, y: b.y, z: b.z });
+        radial(game, b, b.phase >= 2 ? 14 : 10, { speed: 12, damage: 2, color: [1, 0.75, 0.35] });
       }
-      if (T > 1.5) {
+      if (T > 1.6) {
         b.mem.slammed = false;
-        endAttack(b, 1.1);
+        endAttack(b, 1.2);
       }
       break;
     }
 
-    // Aimed shrapnel bursts with a widening cone.
     case 'shrapnel': {
       if (T < 0.5) {
-        b.ai.telegraph = 1 - T / 0.5;
+        b.telegraph = 1 - T / 0.5;
+        faceTarget(b, t, dt, 6);
         break;
       }
-      b.ai.telegraph = 0;
+      b.telegraph = 0;
       b.mem.burst = (b.mem.burst || 0) - dt;
-      if (b.mem.burst <= 0 && T < 2.2) {
-        b.mem.burst = 0.42;
-        fan(game, b, aimAt(b, p), 5 + b.phase * 2, 0.5 + b.phase * 0.18, {
-          speed: 170,
-          damage: 1,
-          color: '#ffd93d',
-          radius: 5,
-          style: 'shrapnel',
+      if (b.mem.burst <= 0 && T < 2.4) {
+        b.mem.burst = 0.5;
+        fan(game, b, Math.atan2(t.dx, t.dz), 5 + b.phase * 2, 0.7 + b.phase * 0.2, {
+          speed: 15, damage: 2, color: [1, 0.85, 0.4], sprite: SPRITE.SHARD,
         });
       }
-      if (T > 2.5) {
+      if (T > 2.7) {
         b.mem.burst = 0;
-        endAttack(b, 0.9);
-      }
-      break;
-    }
-
-    // Marks several spots, then drops anvils on them.
-    case 'anvilDrop': {
-      if (!b.mem.anvils) {
-        b.mem.anvils = [];
-        const n = 3 + b.phase;
-        for (let i = 0; i < n; i++) {
-          const x = i === 0 ? p.x : game.rng.range(ARENA.minX, ARENA.maxX);
-          const y = i === 0 ? p.y : game.rng.range(ARENA.minY, ARENA.maxY);
-          const at = 0.7 + i * 0.18;
-          b.mem.anvils.push({ x, y, at, fired: false });
-          telegraphAt(game, x, y, at, 34, '#ffd93d');
-        }
-        game.sfx('charge', { gain: 0.4 });
-      }
-      let remaining = false;
-      for (const a of b.mem.anvils) {
-        if (a.fired) continue;
-        if (T >= a.at) {
-          a.fired = true;
-          game.spawnShockwave(a.x, a.y, { radius: 40, damage: 2, team: TEAM.ENEMY, color: '#ffd93d' });
-          game.fx('anvil', { x: a.x, y: a.y });
-          game.sfx('bossSlam', { gain: 0.5, rate: 1.3 });
-          game.shake(4, 0.16);
-        } else {
-          remaining = true;
-        }
-      }
-      if (!remaining || T > 3) {
-        b.mem.anvils = null;
         endAttack(b, 1.0);
       }
       break;
     }
 
-    // A rotating flame jet from the bellows.
-    case 'flameSweep': {
-      if (T < 0.8) {
-        b.ai.telegraph = 1 - T / 0.8;
-        b.mem.sweepA = aimAt(b, p) - 0.9 * (b.mem.dir || 1);
-        break;
+    case 'anvils': {
+      if (!b.mem.anvils) {
+        b.mem.anvils = true;
+        const n = 4 + b.phase;
+        for (let i = 0; i < n; i++) {
+          const x = i === 0 ? t.p.x : t.p.x + game.rng.range(-9, 9);
+          const z = i === 0 ? t.p.z : t.p.z + game.rng.range(-9, 9);
+          groundStrike(game, b, x, z, 2.4, 3, 0.7 + i * 0.2, [1, 0.85, 0.35]);
+        }
+        game.sfx('charge', { x: b.x, y: b.y + 1, z: b.z });
       }
-      b.ai.telegraph = 0;
-      b.mem.flameT = (b.mem.flameT || 0) - dt;
-      const a = b.mem.sweepA + (T - 0.8) * 1.25 * (b.mem.dir || 1);
-      if (b.mem.flameT <= 0 && T < 2.6) {
-        b.mem.flameT = 0.06;
-        bullet(game, b, b.x, b.y, a, {
-          speed: 210,
-          damage: 1,
-          color: '#ff7a2f',
-          radius: 6,
-          burn: 1,
-          life: 1.5,
-          style: 'flame',
-        });
-      }
-      if (T > 2.8) {
-        b.mem.dir = (b.mem.dir || 1) * -1;
-        b.mem.flameT = 0;
-        game.sfx('fire');
-        endAttack(b, 1.1);
+      if (T > 2.4) {
+        b.mem.anvils = false;
+        endAttack(b, 1.2);
       }
       break;
     }
 
-    // Phase 3: the forge itself erupts — dense rotating rings.
-    case 'forgeStorm': {
-      if (T < 1.0) {
-        b.ai.telegraph = 1 - T / 1.0;
-        moveToward(b, ARENA.cx, ARENA.cy, 70, dt);
+    case 'flameSweep': {
+      if (T < 0.8) {
+        b.telegraph = 1 - T / 0.8;
+        faceTarget(b, t, dt, 6);
+        b.mem.a = Math.atan2(t.dx, t.dz) - 1.0 * (b.mem.dir || 1);
         break;
       }
-      b.ai.telegraph = 0;
-      b.mem.stormT = (b.mem.stormT || 0) - dt;
-      if (b.mem.stormT <= 0 && T < 4.0) {
-        b.mem.stormT = 0.24;
-        radial(game, b, 10, {
-          offset: b.t * 2.2,
-          speed: 128,
-          damage: 1,
-          color: '#ff5b4a',
-          radius: 5,
-          style: 'ember',
+      b.telegraph = 0;
+      b.mem.flameT = (b.mem.flameT || 0) - dt;
+      const a = b.mem.a + (T - 0.8) * 1.4 * (b.mem.dir || 1);
+      if (b.mem.flameT <= 0 && T < 2.8) {
+        b.mem.flameT = 0.06;
+        bullet(game, b, a, {
+          speed: 18, damage: 2, burn: 1, life: 1.4, color: [1, 0.5, 0.18], sprite: SPRITE.FLAME, radius: 0.3,
         });
-        if (game.rng.chance(0.4)) {
-          game.spawnMinions(b, { id: 'emberling', count: 1, max: 8 });
-        }
       }
-      if (T > 4.4) {
+      if (T > 3.0) {
+        b.mem.dir = (b.mem.dir || 1) * -1;
+        b.mem.flameT = 0;
+        game.sfx('fire', { x: b.x, y: b.y + 1, z: b.z, gain: 0.8 });
+        endAttack(b, 1.2);
+      }
+      break;
+    }
+
+    case 'forgeStorm': {
+      if (T < 1.0) {
+        b.telegraph = 1 - T / 1.0;
+        break;
+      }
+      b.telegraph = 0;
+      b.mem.stormT = (b.mem.stormT || 0) - dt;
+      if (b.mem.stormT <= 0 && T < 4.2) {
+        b.mem.stormT = 0.3;
+        radial(game, b, 11, { offset: b.t * 2.0, speed: 11, damage: 2, color: [1, 0.55, 0.25] });
+        if (game.rng.chance(0.35)) game.spawnMinions(b, { id: 'emberling', count: 1, max: 8 });
+      }
+      if (T > 4.6) {
         b.mem.stormT = 0;
-        endAttack(b, 1.5);
+        endAttack(b, 1.6);
       }
       break;
     }
 
     default:
-      endAttack(b, 1);
+      endAttack(b, 1.2);
   }
-}
-
-function endAttack(b, cd) {
-  b.attack = null;
-  b.attackT = 0;
-  b.ai.telegraph = 0;
-  b.cd = cd;
 }

@@ -1,97 +1,164 @@
 /**
  * Enemy behaviours.
  *
- * One exported function per `behavior` id used in data/enemies.js. Each gets
- * (game, e, dt) and is responsible for movement and for calling the shared
- * shooting helper. Behaviours keep their scratch state on `e.ai` so enemy
- * objects stay poolable and JSON-describable.
+ * One exported function per `behavior` id in data/enemies.js. Each receives
+ * (game, e, dt) and owns that monster's movement and attacks. Scratch state
+ * lives on `e.ai`, so enemies stay plain data.
  *
- * Design rule: every behaviour must telegraph. Anything that can hurt the player
- * either moves predictably or plays a wind-up the player can read.
+ * Two rules shape everything here:
+ *   1. Monsters must *notice* you before they hunt you — sight cones and noise,
+ *      never omniscience. Being unseen is a real state the player can use.
+ *   2. Anything that can hurt you telegraphs first, with a wind-up you can read
+ *      even in near-darkness (the renderer flashes their glow during `warn`).
  */
-import { TILE, ROOM_W, ROOM_H, TEAM } from '../constants.js';
-import { moveEntity, hasLineOfSight, circleBlocked } from '../world/collision.js';
-import { norm, angleDelta, clamp, dist } from '../math.js';
+import { CELL, TEAM, C } from '../constants.js';
+import { moveBody, hasLineOfSight, blocked } from '../world/collision.js';
+import { clamp, angleDelta, dist2d, dist2dSq } from '../math3.js';
+import { SPRITE } from '../../data/sprite-ids.js';
 
-const ROOM_MAX_X = ROOM_W * TILE;
-const ROOM_MAX_Y = ROOM_H * TILE;
+const steerOut = { x: 0, z: 0 };
 
 // ---------------------------------------------------------------- helpers
 
 function toPlayer(game, e) {
   const p = game.player;
   const dx = p.x - e.x;
-  const dy = p.y - e.y;
-  const d = Math.hypot(dx, dy) || 1;
-  return { dx, dy, d, nx: dx / d, ny: dy / d, p };
+  const dz = p.z - e.z;
+  const d = Math.hypot(dx, dz) || 1;
+  return { dx, dz, d, nx: dx / d, nz: dz / d, p };
 }
 
-function walkOpts(e) {
-  return { flying: e.flying, ghost: false };
+function moveOpts(e) {
+  return { flying: e.flying };
 }
 
-/** Steer with acceleration and friction, then resolve against tiles. */
-function steer(game, e, dt, ax, ay, maxSpeed, accel = 500) {
-  e.vx += ax * accel * dt;
-  e.vy += ay * accel * dt;
-  const sp = Math.hypot(e.vx, e.vy);
-  if (sp > maxSpeed) {
-    e.vx = (e.vx / sp) * maxSpeed;
-    e.vy = (e.vy / sp) * maxSpeed;
+/** Accelerate toward a direction, then resolve against the grid. */
+function drive(game, e, dt, dx, dz, speed, accel = 12) {
+  e.vx += dx * accel * dt;
+  e.vz += dz * accel * dt;
+  const sp = Math.hypot(e.vx, e.vz);
+  if (sp > speed) {
+    e.vx = (e.vx / sp) * speed;
+    e.vz = (e.vz / sp) * speed;
   }
-  const fr = Math.pow(0.0016, dt);
-  if (ax === 0 && ay === 0) {
-    e.vx *= fr;
-    e.vy *= fr;
+  if (dx === 0 && dz === 0) {
+    const f = Math.pow(0.0025, dt);
+    e.vx *= f;
+    e.vz *= f;
   }
-  applyMove(game, e, dt);
+  return applyMove(game, e, dt);
 }
 
 function applyMove(game, e, dt) {
-  const res = moveEntity(game.room.tiles, e, e.vx * dt, e.vy * dt, walkOpts(e));
+  const res = moveBody(game.dungeon.cells, e, e.vx * dt, e.vz * dt, moveOpts(e));
   if (res.hitX) e.vx = e.bounceWalls ? -e.vx : 0;
-  if (res.hitY) e.vy = e.bounceWalls ? -e.vy : 0;
+  if (res.hitZ) e.vz = e.bounceWalls ? -e.vz : 0;
+  if (e.vx || e.vz) e.yaw = Math.atan2(e.vx, e.vz);
   return res;
 }
 
+/** Cheap crowd separation so packs do not merge into one body. */
 function separate(game, e, dt) {
-  // Cheap crowd separation so packs do not stack into a single sprite.
   const list = game.enemies;
   let sx = 0;
-  let sy = 0;
+  let sz = 0;
   for (let i = 0; i < list.length; i++) {
     const o = list[i];
     if (o === e || !o.alive) continue;
     const dx = e.x - o.x;
-    const dy = e.y - o.y;
+    const dz = e.z - o.z;
     const minD = e.radius + o.radius;
-    const d2 = dx * dx + dy * dy;
-    if (d2 > minD * minD || d2 < 0.001) continue;
+    const d2 = dx * dx + dz * dz;
+    if (d2 > minD * minD || d2 < 1e-4) continue;
     const d = Math.sqrt(d2);
     sx += (dx / d) * (minD - d);
-    sy += (dy / d) * (minD - d);
+    sz += (dz / d) * (minD - d);
   }
-  if (sx || sy) {
-    e.x += clamp(sx, -40, 40) * dt * 6;
-    e.y += clamp(sy, -40, 40) * dt * 6;
+  if (sx || sz) {
+    moveBody(game.dungeon.cells, e, clamp(sx, -1, 1) * dt * 7, clamp(sz, -1, 1) * dt * 7, moveOpts(e));
   }
 }
 
-/** Generic shooting driver, shared by every behaviour that has `shoot` data. */
-export function tickShooting(game, e, dt, aimAngleOverride) {
+/** Follow the shared distance field toward the player. */
+function pathTowardPlayer(game, e, dt, speed) {
+  const dir = game.nav.steer(e.x, e.z, steerOut);
+  if (dir) {
+    drive(game, e, dt, dir.x, dir.z, speed, 14);
+  } else {
+    const t = toPlayer(game, e);
+    drive(game, e, dt, t.nx, t.nz, speed, 12);
+  }
+  separate(game, e, dt);
+}
+
+/** Idle wandering: pick a heading, walk it until blocked, repeat. */
+function wander(game, e, dt, speed) {
+  e.ai.wanderT -= dt;
+  if (e.ai.wanderT <= 0) {
+    e.ai.wanderT = game.rng.range(1.2, 3.4);
+    const a = game.rng.angle();
+    e.ai.wx = Math.cos(a);
+    e.ai.wz = Math.sin(a);
+  }
+  const res = drive(game, e, dt, e.ai.wx, e.ai.wz, speed, 8);
+  if (res.hitX || res.hitZ) e.ai.wanderT = 0;
+  separate(game, e, dt);
+}
+
+/**
+ * Perception. Sight needs line of sight and a rough facing cone; noise is
+ * omnidirectional but only carries when the player is actually being loud.
+ */
+export function updateSenses(game, e, dt) {
+  const t = toPlayer(game, e);
+  const def = e.def;
+  e.ai.alertCd -= dt;
+
+  let noticed = false;
+  if (t.d < def.sight) {
+    const facing = Math.abs(angleDelta(e.yaw, Math.atan2(t.dx, t.dz)));
+    const lit = game.torchLightsPoint(e.x, e.z) ? 1.35 : 1;
+    const inCone = facing < 1.35 || t.d < 4;
+    if (inCone && hasLineOfSight(game.dungeon.cells, e.x, e.z, t.p.x, t.p.z, {})) {
+      if (t.d < def.sight * lit) noticed = true;
+    }
+  }
+  // Noise: sprinting, shooting and explosions all raise the player's signature.
+  if (!noticed && t.d < def.hear * game.player.noise) noticed = true;
+
+  if (noticed) {
+    e.aggro = 1;
+    e.ai.lastSeenX = t.p.x;
+    e.ai.lastSeenZ = t.p.z;
+    e.ai.loseT = 5.5;
+    if (e.ai.alertCd <= 0 && e.ai.state === 'idle') {
+      e.ai.alertCd = 6;
+      game.sfx('growl', { x: e.x, y: e.y + 1, z: e.z, gain: 0.7 });
+    }
+    e.ai.state = 'hunt';
+  } else if (e.ai.state === 'hunt') {
+    e.ai.loseT -= dt;
+    if (e.ai.loseT <= 0) {
+      e.ai.state = 'idle';
+      e.aggro = 0;
+    }
+  }
+  return t;
+}
+
+// ---------------------------------------------------------------- shooting
+
+export function tickShooting(game, e, dt) {
   const cfg = e.def.shoot;
   if (!cfg) return;
-  const { d } = toPlayer(game, e);
-  const range = (e.def.params && e.def.params.range) || 420;
-  e.ai.shotCd -= dt;
+  const t = toPlayer(game, e);
 
-  // Spiral pattern drip-feeds bullets after the trigger.
   if (e.ai.spiralLeft > 0) {
     e.ai.spiralT -= dt;
     if (e.ai.spiralT <= 0) {
-      e.ai.spiralT = 0.06;
+      e.ai.spiralT = 0.07;
       e.ai.spiralLeft--;
-      e.ai.spiralAngle += (cfg.spin || 1) * 0.55;
+      e.ai.spiralAngle += 0.5;
       fireShot(game, e, e.ai.spiralAngle, cfg);
     }
     return;
@@ -99,33 +166,31 @@ export function tickShooting(game, e, dt, aimAngleOverride) {
 
   if (e.ai.warnT > 0) {
     e.ai.warnT -= dt;
+    e.telegraph = e.ai.warnT / Math.max(0.01, e.ai.warnMax);
     if (e.ai.warnT <= 0) {
-      const aim = aimAngleOverride != null ? aimAngleOverride : Math.atan2(game.player.y - e.y, game.player.x - e.x);
-      volley(game, e, aim, cfg);
+      e.telegraph = 0;
+      volley(game, e, Math.atan2(t.dx, t.dz), cfg);
       e.ai.shotCd = cfg.every * game.enemyFireScale;
     }
     return;
   }
 
-  if (e.ai.shotCd <= 0 && d < range && (e.flying || hasLineOfSight(game.room.tiles, e.x, e.y, game.player.x, game.player.y, walkOpts(e)))) {
-    e.ai.warnT = cfg.warn || 0.3;
-    e.ai.warnMax = e.ai.warnT;
-    game.fx('telegraph', { x: e.x, y: e.y, time: e.ai.warnT, color: e.tint });
-  }
+  e.ai.shotCd -= dt;
+  if (e.ai.state !== 'hunt') return;
+  if (e.ai.shotCd > 0) return;
+  if (t.d > e.def.sight) return;
+  if (!e.flying && !hasLineOfSight(game.dungeon.cells, e.x, e.z, t.p.x, t.p.z, {})) return;
+
+  e.ai.warnT = cfg.warn || 0.35;
+  e.ai.warnMax = e.ai.warnT;
+  e.telegraph = 1;
 }
 
 function volley(game, e, aim, cfg) {
-  if (cfg.spawn) {
-    game.spawnMinions(e, cfg.spawn);
-    game.sfx('spawn');
-    return;
-  }
   const count = cfg.count || 1;
   const pattern = cfg.pattern || 'spread';
-
   if (pattern === 'radial') {
-    const off = (cfg.spin || 0) * e.t;
-    for (let i = 0; i < count; i++) fireShot(game, e, off + (i / count) * Math.PI * 2, cfg);
+    for (let i = 0; i < count; i++) fireShot(game, e, (i / count) * Math.PI * 2, cfg);
   } else if (pattern === 'spiral') {
     e.ai.spiralLeft = count;
     e.ai.spiralT = 0;
@@ -137,375 +202,425 @@ function volley(game, e, aim, cfg) {
       fireShot(game, e, aim + t * spread * 2, cfg);
     }
   }
-  game.sfx('enemyShoot');
+  game.sfx('enemyShoot', { x: e.x, y: e.y + 1, z: e.z });
 }
 
-function fireShot(game, e, angle, cfg) {
+export function fireShot(game, e, angle, cfg) {
   const s = game.spawnShot(TEAM.ENEMY);
-  if (!s) return;
-  s.x = s.px = e.x;
-  s.y = s.py = e.y;
-  s.angle = angle;
-  s.speed = (cfg.speed || 120) * game.enemyShotSpeedScale;
-  s.vx = Math.cos(angle) * s.speed;
-  s.vy = Math.sin(angle) * s.speed;
+  if (!s) return null;
+  const eye = e.y + e.height * 0.6;
+  s.x = s.px = e.x + Math.sin(angle) * (e.radius + 0.2);
+  s.y = s.py = eye;
+  s.z = s.pz = e.z + Math.cos(angle) * (e.radius + 0.2);
+  const speed = (cfg.speed || 12) * game.enemyShotSpeedScale;
+  const target = game.player;
+  // Lead the shot slightly toward the player's chest, not their feet.
+  const dy = cfg.arc ? 0 : clamp((target.y + 1.1 - eye) * 0.35, -0.6, 0.6);
+  s.vx = Math.sin(angle) * speed;
+  s.vy = dy * speed * 0.25 + (cfg.arc ? cfg.arc * speed * 0.5 : 0);
+  s.vz = Math.cos(angle) * speed;
+  s.speed = speed;
+  s.gravity = cfg.arc ? 12 : 0;
   s.damage = cfg.damage || 1;
-  s.radius = cfg.radius || 5;
-  s.life = s.maxLife = cfg.life || 3.4;
-  s.kind = cfg.kind || 'bolt';
-  s.color = game.shotColor(cfg.kind);
-  s.burn = cfg.burn ? 1 : 0;
-  s.homing = cfg.homing || 0;
-  s.arc = cfg.arc ? 1 : 0;
+  s.radius = cfg.radius || 0.22;
+  s.size = s.radius * 1.8;
+  s.life = s.maxLife = cfg.life || 4;
+  s.burn = cfg.burn || 0;
+  s.sprite = cfg.arc ? SPRITE.BLOOD : SPRITE.DOT;
+  const col = cfg.color || [1, 0.5, 0.4];
+  s.r = col[0];
+  s.g = col[1];
+  s.b = col[2];
   s.puddle = cfg.puddle || null;
   s.owner = e;
+  s.lightRadius = 3;
   return s;
 }
 
-// ---------------------------------------------------------------- behaviours
+// -------------------------------------------------------------- behaviours
 
 export const BEHAVIORS = {
-  /** Walks straight at the player. The baseline threat. */
-  chaser(game, e, dt) {
-    const { nx, ny, d } = toPlayer(game, e);
-    const wobble = e.def.params && e.def.params.wobble ? Math.sin(e.t * 3.1 + e.seedPhase) * e.def.params.wobble : 0;
-    const ang = Math.atan2(ny, nx) + wobble;
-    steer(game, e, dt, Math.cos(ang), Math.sin(ang), e.speed, (e.def.params && e.def.params.accel) || 300);
-    separate(game, e, dt);
-    e.facing = d > 4 ? Math.sign(nx) || e.facing : e.facing;
-    tickShooting(game, e, dt);
-  },
-
-  /** Hops in bursts: readable, punishable gaps between jumps. */
-  hopper(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    e.ai.hopT -= dt;
-    if (e.ai.hopping > 0) {
-      e.ai.hopping -= dt;
-      e.squashT = e.ai.hopping / P.hopTime;
-      applyMove(game, e, dt);
-      e.vx *= Math.pow(0.25, dt);
-      e.vy *= Math.pow(0.25, dt);
-      if (e.ai.hopping <= 0 && P.shockwave) {
-        game.spawnShockwave(e.x, e.y, { radius: 52, damage: 1, team: TEAM.ENEMY, color: e.tint });
-        game.shake(3, 0.15);
+  /** Walks the navigation field straight at you. The baseline threat. */
+  stalker(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    if (e.ai.state === 'hunt') {
+      pathTowardPlayer(game, e, dt, e.speed);
+      if (e.def.params.trail && game.rng.chance(dt * 6)) {
+        game.fx('ember', { x: e.x, y: e.y + 0.2, z: e.z, color: [1, 0.5, 0.15] });
       }
-    } else if (e.ai.hopT <= 0) {
-      e.ai.hopT = P.hopEvery * game.enemyFireScale;
-      e.ai.hopping = P.hopTime;
-      const a = Math.atan2(t.ny, t.nx) + game.rng.range(-0.25, 0.25);
-      e.vx = Math.cos(a) * P.hopPower;
-      e.vy = Math.sin(a) * P.hopPower;
-      e.facing = Math.sign(Math.cos(a)) || e.facing;
     } else {
-      e.vx *= Math.pow(0.02, dt);
-      e.vy *= Math.pow(0.02, dt);
-      e.squashT = 0;
-      applyMove(game, e, dt);
+      wander(game, e, dt, e.speed * 0.45);
     }
-    separate(game, e, dt);
     tickShooting(game, e, dt);
   },
 
-  /** Rooted. Fires patterns; the player must use cover. */
+  /** Keeps its distance and shoots; forces the player to close in. */
+  kiter(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    if (e.ai.state === 'hunt') {
+      let dx = 0;
+      let dz = 0;
+      if (t.d < P.flee) {
+        dx = -t.nx;
+        dz = -t.nz;
+      } else if (t.d > P.keep) {
+        dx = t.nx;
+        dz = t.nz;
+      } else {
+        dx = -t.nz * e.ai.orbitDir;
+        dz = t.nx * e.ai.orbitDir;
+      }
+      drive(game, e, dt, dx, dz, e.speed, 12);
+      e.yaw = Math.atan2(t.dx, t.dz);
+      separate(game, e, dt);
+    } else {
+      wander(game, e, dt, e.speed * 0.4);
+    }
+    tickShooting(game, e, dt);
+  },
+
+  /** Circles at a fixed radius, shooting. */
+  orbiter(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    if (e.ai.state === 'hunt') {
+      e.ai.orbitA += P.orbitSpeed * dt * e.ai.orbitDir;
+      const tx = t.p.x + Math.cos(e.ai.orbitA) * P.orbit;
+      const tz = t.p.z + Math.sin(e.ai.orbitA) * P.orbit;
+      const dx = tx - e.x;
+      const dz = tz - e.z;
+      const d = Math.hypot(dx, dz) || 1;
+      drive(game, e, dt, dx / d, dz / d, e.speed, 14);
+      e.yaw = Math.atan2(t.dx, t.dz);
+    } else {
+      wander(game, e, dt, e.speed * 0.35);
+    }
+    tickShooting(game, e, dt);
+  },
+
+  /** Fast, jittery, unpredictable — the swarm. */
+  erratic(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    e.ai.turnT -= dt;
+    if (e.ai.turnT <= 0) {
+      e.ai.turnT = P.turnEvery * game.rng.range(0.6, 1.5);
+      const bias = e.ai.state === 'hunt' ? 0.75 : 0.1;
+      const base = Math.atan2(t.dx, t.dz);
+      const a = base + game.rng.range(-1, 1) * (1 - bias) * Math.PI * 1.5;
+      e.ai.wx = Math.sin(a);
+      e.ai.wz = Math.cos(a);
+      e.ai.burstT = 0.3;
+    }
+    e.ai.burstT -= dt;
+    const speed = e.ai.burstT > 0 ? P.burst : e.speed;
+    const res = drive(game, e, dt, e.ai.wx, e.ai.wz, speed, 22);
+    if (res.hitX) e.ai.wx *= -1;
+    if (res.hitZ) e.ai.wz *= -1;
+    e.bob = Math.sin(e.t * 9) * 0.12;
+    tickShooting(game, e, dt);
+  },
+
+  /** Slow drift; the danger is the bullet pattern, not the body. */
+  drifter(game, e, dt) {
+    updateSenses(game, e, dt);
+    e.ai.wanderT -= dt;
+    if (e.ai.wanderT <= 0) {
+      e.ai.wanderT = game.rng.range(1.5, 3);
+      const a = game.rng.angle();
+      e.ai.wx = Math.cos(a);
+      e.ai.wz = Math.sin(a);
+    }
+    const res = drive(game, e, dt, e.ai.wx, e.ai.wz, e.speed, 5);
+    if (res.hitX) e.ai.wx *= -1;
+    if (res.hitZ) e.ai.wz *= -1;
+    e.bob = Math.sin(e.t * 1.4) * 0.18;
+    tickShooting(game, e, dt);
+  },
+
+  /** Rooted. Fires patterns when it has line of sight. */
   turret(game, e, dt) {
-    e.vx = e.vy = 0;
+    const t = updateSenses(game, e, dt);
+    e.vx = e.vz = 0;
+    e.yaw += angleDelta(e.yaw, Math.atan2(t.dx, t.dz)) * Math.min(1, dt * 2.5);
     tickShooting(game, e, dt);
   },
 
-  /** Flies a sine path toward the player, ignoring terrain. */
-  flyerSine(game, e, dt) {
+  /** Waits, then commits to a single readable lunge. */
+  ambusher(game, e, dt) {
+    const t = updateSenses(game, e, dt);
     const P = e.def.params;
-    const t = toPlayer(game, e);
-    const base = Math.atan2(t.ny, t.nx);
-    const perp = base + Math.PI / 2;
-    const off = Math.sin(e.t * P.freq + e.seedPhase) * P.amp;
-    const tx = t.p.x + Math.cos(perp) * off;
-    const ty = t.p.y + Math.sin(perp) * off;
-    const dir = norm(tx - e.x, ty - e.y);
-    e.vx = dir.x * e.speed * P.approach + Math.cos(perp) * Math.cos(e.t * P.freq) * P.amp * 0.6;
-    e.vy = dir.y * e.speed * P.approach + Math.sin(perp) * Math.cos(e.t * P.freq) * P.amp * 0.6;
-    applyMove(game, e, dt);
-    e.facing = Math.sign(dir.x) || e.facing;
-    if (P.dust && game.rng.chance(dt * 6)) game.fx('dust', { x: e.x, y: e.y, color: e.tint });
-    tickShooting(game, e, dt);
-  },
-
-  /** Wind-up, then a committed dash. Dodge the line, punish the recovery. */
-  charger(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    switch (e.ai.state) {
-      case 'dash': {
+    switch (e.ai.state2) {
+      case 'lunge': {
         e.ai.stateT -= dt;
-        const res = applyMove(game, e, dt);
-        if (P.trail && game.rng.chance(dt * 14)) game.fx('trail', { x: e.x, y: e.y, color: e.tint });
-        if (e.ai.stateT <= 0 || res.hitX || res.hitY) {
-          e.ai.state = 'rest';
+        applyMove(game, e, dt);
+        if (e.ai.stateT <= 0) {
+          e.ai.state2 = 'rest';
           e.ai.stateT = P.rest;
-          if (res.hitX || res.hitY) {
-            game.shake(3, 0.12);
-            game.fx('impact', { x: e.x, y: e.y, color: e.tint });
-          }
         }
         break;
       }
       case 'wind': {
         e.ai.stateT -= dt;
-        e.ai.aim = Math.atan2(t.ny, t.nx);
+        e.telegraph = e.ai.stateT / P.warn;
         e.vx *= Math.pow(0.01, dt);
-        e.vy *= Math.pow(0.01, dt);
-        applyMove(game, e, dt);
+        e.vz *= Math.pow(0.01, dt);
+        e.yaw = Math.atan2(t.dx, t.dz);
         if (e.ai.stateT <= 0) {
-          e.ai.state = 'dash';
-          e.ai.stateT = P.dashTime;
-          e.vx = Math.cos(e.ai.aim) * P.dashSpeed;
-          e.vy = Math.sin(e.ai.aim) * P.dashSpeed;
-          game.sfx('dash', { gain: 0.6 });
+          e.telegraph = 0;
+          e.ai.state2 = 'lunge';
+          e.ai.stateT = 0.45;
+          e.vx = t.nx * P.lungeSpeed;
+          e.vz = t.nz * P.lungeSpeed;
+          game.sfx('screech', { x: e.x, y: e.y + 1, z: e.z, gain: 0.6 });
         }
         break;
       }
-      default: {
+      case 'rest': {
         e.ai.stateT -= dt;
-        const ang = Math.atan2(t.ny, t.nx);
-        steer(game, e, dt, Math.cos(ang) * 0.6, Math.sin(ang) * 0.6, e.speed, 240);
-        if (e.ai.stateT <= 0 && t.d < P.range) {
-          e.ai.state = 'wind';
-          e.ai.stateT = P.telegraph * game.enemyFireScale;
-          e.ai.warnMax = e.ai.stateT;
+        drive(game, e, dt, 0, 0, 0);
+        if (e.ai.stateT <= 0) e.ai.state2 = 'idle';
+        break;
+      }
+      default: {
+        if (e.ai.state === 'hunt') {
+          if (t.d < P.lungeRange) {
+            e.ai.state2 = 'wind';
+            e.ai.stateT = P.warn;
+          } else {
+            pathTowardPlayer(game, e, dt, e.speed * 0.8);
+          }
+        } else {
+          wander(game, e, dt, e.speed * 0.3);
         }
       }
     }
-    e.ai.telegraph = e.ai.state === 'wind' ? e.ai.stateT / Math.max(0.01, e.ai.warnMax) : 0;
-    e.facing = Math.sign(t.nx) || e.facing;
     separate(game, e, dt);
   },
 
-  /** Slow shielded advance: frontal shots bounce, so flank it. */
-  guard(game, e, dt) {
+  /**
+   * Pack behaviour: circle the player and take turns striking. Only one pack
+   * member may commit at a time, which reads as coordination rather than chaos.
+   */
+  packHunter(game, e, dt) {
+    const t = updateSenses(game, e, dt);
     const P = e.def.params;
-    const t = toPlayer(game, e);
-    // The shield turns at a limited rate. A shield that snaps to face the
-    // player can never be flanked, which turns a "reposition and punish" enemy
-    // into an unkillable wall — the whole point is that footwork beats it.
-    const want = Math.atan2(t.ny, t.nx);
-    const turn = (P.turnRate || 1.7) * dt;
+    if (e.ai.state !== 'hunt') {
+      wander(game, e, dt, e.speed * 0.4);
+      return;
+    }
+
+    if (e.ai.dashT > 0) {
+      e.ai.dashT -= dt;
+      applyMove(game, e, dt);
+      if (game.rng.chance(dt * 8)) game.fx('trail', { x: e.x, y: e.y + 0.4, z: e.z, color: [0.8, 0.5, 0.3] });
+      return;
+    }
+    if (e.ai.windT > 0) {
+      e.ai.windT -= dt;
+      e.telegraph = e.ai.windT / P.warn;
+      e.yaw = Math.atan2(t.dx, t.dz);
+      drive(game, e, dt, 0, 0, 0);
+      if (e.ai.windT <= 0) {
+        e.telegraph = 0;
+        e.ai.dashT = P.dashTime;
+        e.vx = t.nx * P.dashSpeed;
+        e.vz = t.nz * P.dashSpeed;
+        game.sfx('screech', { x: e.x, y: e.y + 1, z: e.z, gain: 0.5 });
+      }
+      return;
+    }
+
+    e.ai.strikeT -= dt;
+    if (e.ai.strikeT <= 0 && t.d < 12 && game.claimPackToken(e)) {
+      e.ai.strikeT = P.strikeEvery * game.enemyFireScale;
+      e.ai.windT = P.warn;
+      if (P.howl) game.sfx('growl', { x: e.x, y: e.y + 1, z: e.z });
+    } else {
+      e.ai.orbitA += dt * 1.1 * e.ai.orbitDir;
+      const tx = t.p.x + Math.cos(e.ai.orbitA) * P.circle;
+      const tz = t.p.z + Math.sin(e.ai.orbitA) * P.circle;
+      const dx = tx - e.x;
+      const dz = tz - e.z;
+      const d = Math.hypot(dx, dz) || 1;
+      // Fall back to pathing when the circling target is through a wall.
+      if (hasLineOfSight(game.dungeon.cells, e.x, e.z, tx, tz, {})) {
+        drive(game, e, dt, dx / d, dz / d, e.speed, 16);
+      } else {
+        pathTowardPlayer(game, e, dt, e.speed);
+      }
+      separate(game, e, dt);
+    }
+  },
+
+  /**
+   * The signature horror enemy: creeps when watched, sprints when it is not.
+   * Looking at it is the only thing keeping it away.
+   */
+  hunter(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    const watched = game.playerLooksAt(e) && game.torchLightsPoint(e.x, e.z);
+    e.watched = watched;
+
+    if (e.ai.state !== 'hunt' && !watched) {
+      wander(game, e, dt, e.speed * 0.35);
+      return;
+    }
+
+    if (e.ai.chargeT > 0) {
+      e.ai.chargeT -= dt;
+      applyMove(game, e, dt);
+      return;
+    }
+    if (e.ai.windT > 0) {
+      e.ai.windT -= dt;
+      e.telegraph = e.ai.windT / P.warn;
+      drive(game, e, dt, 0, 0, 0);
+      e.yaw = Math.atan2(t.dx, t.dz);
+      if (e.ai.windT <= 0) {
+        e.telegraph = 0;
+        e.ai.chargeT = 0.55;
+        e.vx = t.nx * P.chargeSpeed;
+        e.vz = t.nz * P.chargeSpeed;
+        game.sfx('screech', { x: e.x, y: e.y + 1.2, z: e.z });
+      }
+      return;
+    }
+
+    if (watched && P.freezeWhenWatched) {
+      // Frozen, but never fully still: it edges closer at a crawl.
+      drive(game, e, dt, t.nx * 0.25, t.nz * 0.25, P.creepSpeed, 6);
+      e.yaw = Math.atan2(t.dx, t.dz);
+    } else {
+      if (t.d < P.chargeRange && e.ai.strikeT <= 0) {
+        e.ai.strikeT = 3.5;
+        e.ai.windT = P.warn;
+      } else {
+        e.ai.strikeT -= dt;
+        pathTowardPlayer(game, e, dt, e.speed);
+      }
+    }
+    separate(game, e, dt);
+  },
+
+  /** Rushes and detonates. Kill it at range or eat the blast. */
+  exploder(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    if (e.ai.fuseT > 0) {
+      e.ai.fuseT -= dt;
+      e.telegraph = 1 - e.ai.fuseT / P.fuse;
+      e.scale = e.baseScale * (1 + (1 - e.ai.fuseT / P.fuse) * 0.45);
+      drive(game, e, dt, t.nx, t.nz, e.speed * 0.4, 6);
+      if (e.ai.fuseT <= 0) {
+        game.explode(e.x, e.y + 0.5, e.z, P.radius, P.damage, TEAM.ENEMY);
+        game.killEnemy(e, { silent: true });
+      }
+      return;
+    }
+    if (e.ai.state === 'hunt') {
+      pathTowardPlayer(game, e, dt, e.speed);
+      e.bob = Math.sin(e.t * 7) * 0.1;
+      if (t.d < P.fuseRange) {
+        e.ai.fuseT = P.fuse;
+        game.sfx('charge', { x: e.x, y: e.y + 0.6, z: e.z, gain: 0.8 });
+      }
+    } else {
+      wander(game, e, dt, e.speed * 0.4);
+      e.bob = Math.sin(e.t * 4) * 0.08;
+    }
+  },
+
+  /** Heavy melee: closes, winds up, slams an area. */
+  slammer(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    if (e.ai.state2 === 'wind') {
+      e.ai.stateT -= dt;
+      e.telegraph = e.ai.stateT / P.windup;
+      drive(game, e, dt, 0, 0, 0);
+      e.yaw = Math.atan2(t.dx, t.dz);
+      if (e.ai.stateT <= 0) {
+        e.telegraph = 0;
+        e.ai.state2 = 'rest';
+        e.ai.stateT = P.cooldown;
+        game.explode(e.x, e.y + 0.4, e.z, P.slamRadius, P.slamDamage, TEAM.ENEMY, { noVisual: false });
+        game.shake(0.9, 0.25);
+        game.sfx('bossSlam', { x: e.x, y: e.y, z: e.z, gain: 0.7 });
+        if (P.ringShot) {
+          for (let i = 0; i < P.ringShot; i++) {
+            fireShot(game, e, (i / P.ringShot) * Math.PI * 2, {
+              speed: 13, damage: 1, color: [1, 0.7, 0.3], life: 2.4,
+            });
+          }
+        }
+      }
+      return;
+    }
+    if (e.ai.state2 === 'rest') {
+      e.ai.stateT -= dt;
+      if (e.ai.state === 'hunt') pathTowardPlayer(game, e, dt, e.speed * 0.7);
+      if (e.ai.stateT <= 0) e.ai.state2 = 'idle';
+      return;
+    }
+    if (e.ai.state === 'hunt') {
+      pathTowardPlayer(game, e, dt, e.speed);
+      if (t.d < P.range) {
+        e.ai.state2 = 'wind';
+        e.ai.stateT = P.windup;
+        game.fx('telegraph', { x: e.x, y: 0.1, z: e.z, radius: P.slamRadius, time: P.windup, color: [1, 0.4, 0.2] });
+      }
+    } else {
+      wander(game, e, dt, e.speed * 0.4);
+    }
+  },
+
+  /** Shielded advance: frontal shots bounce, so flank it. */
+  guard(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    // The shield turns at a limited rate — a shield that snaps to face you can
+    // never be flanked, which turns a positioning puzzle into a wall.
+    const want = Math.atan2(t.dx, t.dz);
+    const turn = P.turnRate * dt;
     e.shieldAngle += clamp(angleDelta(e.shieldAngle, want), -turn, turn);
     e.shieldArc = P.shieldArc;
-    const speedMul = P.advance ? 1 : 0.7;
-    steer(game, e, dt, t.nx, t.ny, e.speed * speedMul, 160);
-    separate(game, e, dt);
-    if (P.regen && e.noRegenT <= 0) {
-      e.ai.regenT = (e.ai.regenT || 0) + dt;
-      if (e.ai.regenT > 1 && e.hp < e.maxHp) {
-        e.ai.regenT = 0;
-        e.hp = Math.min(e.maxHp, e.hp + P.regen);
+    e.yaw = e.shieldAngle;
+
+    if (e.ai.state === 'hunt') {
+      pathTowardPlayer(game, e, dt, e.speed * (P.advance ? 1 : 0.7));
+      e.ai.slashT -= dt;
+      if (t.d < P.slashRange && e.ai.slashT <= 0) {
+        e.ai.slashT = P.slashEvery;
+        game.explode(
+          e.x + t.nx * 1.4, e.y + 0.8, e.z + t.nz * 1.4,
+          2.2, 3, TEAM.ENEMY, { noVisual: false },
+        );
+        game.sfx('bossSlam', { x: e.x, y: e.y, z: e.z, gain: 0.5, rate: 1.4 });
       }
-    }
-    if (P.chargeSlash) {
-      e.ai.slashT = (e.ai.slashT || 3) - dt;
-      if (e.ai.slashT <= 0 && t.d < 150) {
-        e.ai.slashT = 4;
-        game.spawnShockwave(e.x + t.nx * 30, e.y + t.ny * 30, {
-          radius: 54,
-          damage: 2,
-          team: TEAM.ENEMY,
-          color: e.tint,
-        });
-        game.sfx('bossSlam', { gain: 0.5 });
-      }
-    }
-    e.facing = Math.sign(t.nx) || e.facing;
-    tickShooting(game, e, dt);
-  },
-
-  /** Circles at a fixed radius while shooting. */
-  orbiter(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    e.ai.orbitA = (e.ai.orbitA || e.seedPhase) + P.orbitSpeed * dt * e.ai.orbitDir;
-    const radius = P.orbit + Math.sin(e.t * P.drift) * 18;
-    const tx = t.p.x + Math.cos(e.ai.orbitA) * radius;
-    const ty = t.p.y + Math.sin(e.ai.orbitA) * radius;
-    const dir = norm(tx - e.x, ty - e.y);
-    e.vx = dir.x * e.speed;
-    e.vy = dir.y * e.speed;
-    applyMove(game, e, dt);
-    e.facing = Math.sign(t.nx) || e.facing;
-    tickShooting(game, e, dt);
-  },
-
-  /** Fast, jittery, unpredictable — bats. */
-  erratic(game, e, dt) {
-    const P = e.def.params;
-    e.ai.turnT -= dt;
-    if (e.ai.turnT <= 0) {
-      e.ai.turnT = P.turnEvery * game.rng.range(0.6, 1.5);
-      const t = toPlayer(game, e);
-      const bias = t.d > 200 ? 0.85 : 0.35;
-      const a = Math.atan2(t.ny, t.nx) + game.rng.range(-1, 1) * (1 - bias) * Math.PI * 1.4;
-      e.ai.dirX = Math.cos(a);
-      e.ai.dirY = Math.sin(a);
-      e.ai.burstT = 0.22;
-    }
-    e.ai.burstT -= dt;
-    const boost = e.ai.burstT > 0 ? P.burst : e.speed;
-    e.vx = e.ai.dirX * boost;
-    e.vy = e.ai.dirY * boost;
-    const res = applyMove(game, e, dt);
-    if (res.hitX) e.ai.dirX *= -1;
-    if (res.hitY) e.ai.dirY *= -1;
-    e.facing = Math.sign(e.ai.dirX) || e.facing;
-    e.wingPhase = e.t * 18;
-    tickShooting(game, e, dt);
-  },
-
-  /** Hugs walls, then pounces when the player comes close. */
-  wallhugger(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    if (e.ai.pounceT > 0) {
-      e.ai.pounceT -= dt;
-      applyMove(game, e, dt);
-      e.vx *= Math.pow(0.3, dt);
-      e.vy *= Math.pow(0.3, dt);
-    } else if (t.d < P.pounceRange && e.ai.pounceCd <= 0) {
-      e.ai.pounceCd = 2.2;
-      e.ai.pounceT = 0.4;
-      e.vx = t.nx * P.pounce;
-      e.vy = t.ny * P.pounce;
-      game.sfx('dash', { gain: 0.4 });
     } else {
-      e.ai.pounceCd -= dt;
-      // Prefer moving along walls: sample the nearest blocked direction.
-      const ang = Math.atan2(t.ny, t.nx);
-      const near = nearestWallNormal(game, e);
-      const tang = near ? Math.atan2(-near.y, -near.x) + Math.PI / 2 : ang;
-      const mix = near ? P.hugStrength : 0;
-      const finalA = ang * (1 - mix) + tang * mix;
-      steer(game, e, dt, Math.cos(finalA), Math.sin(finalA), e.speed, 260);
+      wander(game, e, dt, e.speed * 0.35);
     }
     separate(game, e, dt);
-    e.facing = Math.sign(t.nx) || e.facing;
-    tickShooting(game, e, dt);
   },
 
-  /** Keeps its preferred range and shoots — forces the player to close in. */
-  kiter(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    let ax = 0;
-    let ay = 0;
-    if (t.d < P.flee) {
-      ax = -t.nx;
-      ay = -t.ny;
-    } else if (t.d > P.keep) {
-      ax = t.nx;
-      ay = t.ny;
-    } else {
-      // Strafe at the sweet spot.
-      ax = -t.ny * e.ai.orbitDir;
-      ay = t.nx * e.ai.orbitDir;
-    }
-    steer(game, e, dt, ax, ay, e.speed, 300);
-    separate(game, e, dt);
-    e.facing = Math.sign(t.nx) || e.facing;
-    tickShooting(game, e, dt);
-  },
-
-  /** Slow aimless float; the danger is the bullet pattern, not the body. */
-  drifter(game, e, dt) {
-    e.ai.driftT -= dt;
-    if (e.ai.driftT <= 0) {
-      e.ai.driftT = game.rng.range(1.2, 2.6);
-      const a = game.rng.angle();
-      e.ai.dirX = Math.cos(a);
-      e.ai.dirY = Math.sin(a);
-    }
-    e.vx = e.ai.dirX * e.speed;
-    e.vy = e.ai.dirY * e.speed;
-    const res = applyMove(game, e, dt);
-    if (res.hitX) e.ai.dirX *= -1;
-    if (res.hitY) e.ai.dirY *= -1;
-    tickShooting(game, e, dt);
-  },
-
-  /** Blinks in and lunges. Always telegraphs the arrival. */
-  teleporter(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    e.ai.blinkT -= dt;
-    if (e.ai.fadeT > 0) {
-      e.ai.fadeT -= dt;
-      e.alpha = 0.25;
-      if (e.ai.fadeT <= 0) {
-        const a = game.rng.angle();
-        const r = P.blinkRange * game.rng.range(0.4, 1);
-        const nx = clamp(t.p.x + Math.cos(a) * r, TILE, ROOM_MAX_X - TILE);
-        const ny = clamp(t.p.y + Math.sin(a) * r, TILE, ROOM_MAX_Y - TILE);
-        if (!circleBlocked(game.room.tiles, nx, ny, e.radius, walkOpts(e))) {
-          e.x = nx;
-          e.y = ny;
-        }
-        e.alpha = 1;
-        game.fx('teleport', { x: e.x, y: e.y, color: e.tint });
-        game.sfx('teleport');
-        const t2 = toPlayer(game, e);
-        e.vx = t2.nx * P.lunge;
-        e.vy = t2.ny * P.lunge;
-      }
-    } else if (e.ai.blinkT <= 0) {
-      e.ai.blinkT = P.blinkEvery * game.enemyFireScale;
-      e.ai.fadeT = P.warn;
-      game.fx('teleport', { x: e.x, y: e.y, color: e.tint });
-    } else {
-      const ang = Math.atan2(t.ny, t.nx);
-      steer(game, e, dt, Math.cos(ang) * 0.5, Math.sin(ang) * 0.5, e.speed * 0.6, 200);
-      if (P.afterimage && game.rng.chance(dt * 8)) game.fx('trail', { x: e.x, y: e.y, color: e.tint });
-    }
-    applyMove(game, e, dt);
-    e.facing = Math.sign(t.nx) || e.facing;
-  },
-
-  /** Rooted spawner. Kill it or drown in adds. */
-  summoner(game, e, dt) {
-    const P = e.def.params;
-    e.vx = e.vy = 0;
-    e.ai.spawnT -= dt;
-    if (e.ai.warnT > 0) {
-      e.ai.warnT -= dt;
-      if (e.ai.warnT <= 0) {
-        game.spawnMinions(e, { id: P.spawn, count: P.count, max: P.max });
-        game.sfx('spawn');
-        game.fx('summon', { x: e.x, y: e.y, color: e.tint });
-      }
-    } else if (e.ai.spawnT <= 0) {
-      e.ai.spawnT = P.every * game.enemyFireScale;
-      e.ai.warnT = P.warn;
-      e.ai.warnMax = P.warn;
-    }
-    e.ai.telegraph = e.ai.warnT > 0 ? e.ai.warnT / P.warn : 0;
-  },
-
-  /** Submerges, repositions underground, erupts under the player. */
+  /** Submerges, repositions underground, erupts beneath you. */
   burrower(game, e, dt) {
+    const t = updateSenses(game, e, dt);
     const P = e.def.params;
-    const t = toPlayer(game, e);
     e.ai.phaseT -= dt;
     if (e.ai.under) {
       e.invulnerable = true;
       e.hidden = true;
-      const dir = norm(t.p.x - e.x, t.p.y - e.y);
-      e.x += dir.x * e.speed * dt;
-      e.y += dir.y * e.speed * dt;
-      e.x = clamp(e.x, TILE, ROOM_MAX_X - TILE);
-      e.y = clamp(e.y, TILE, ROOM_MAX_Y - TILE);
-      if (game.rng.chance(dt * 20)) game.fx('mound', { x: e.x, y: e.y, color: e.tint });
+      const dir = game.nav.steer(e.x, e.z, steerOut);
+      if (dir) moveBody(game.dungeon.cells, e, dir.x * e.speed * dt, dir.z * e.speed * dt, moveOpts(e));
+      if (game.rng.chance(dt * 14)) game.fx('rubble', { x: e.x, y: 0.1, z: e.z });
       if (e.ai.phaseT <= 0) {
         if (e.ai.warn <= 0) {
           e.ai.warn = P.warn;
-          game.fx('mound', { x: e.x, y: e.y, color: e.tint, big: true });
+          game.fx('telegraph', { x: e.x, y: 0.1, z: e.z, radius: 1.8, time: P.warn, color: [1, 0.8, 0.3] });
         } else {
           e.ai.warn -= dt;
           if (e.ai.warn <= 0) {
@@ -513,276 +628,123 @@ export const BEHAVIORS = {
             e.invulnerable = false;
             e.hidden = false;
             e.ai.phaseT = P.over;
-            game.spawnShockwave(e.x, e.y, { radius: 46, damage: 1, team: TEAM.ENEMY, color: e.tint });
-            game.sfx('bossSlam', { gain: 0.4 });
+            game.explode(e.x, e.y + 0.4, e.z, 2.6, 2, TEAM.ENEMY);
+            game.sfx('bossSlam', { x: e.x, y: e.y, z: e.z, gain: 0.5, rate: 1.5 });
           }
         }
       }
     } else {
-      const ang = Math.atan2(t.ny, t.nx);
-      steer(game, e, dt, Math.cos(ang), Math.sin(ang), e.speed * 0.55, 260);
+      if (e.ai.state === 'hunt') pathTowardPlayer(game, e, dt, e.speed * 0.45);
+      else wander(game, e, dt, e.speed * 0.3);
       if (e.ai.phaseT <= 0) {
         e.ai.under = true;
         e.ai.phaseT = P.under;
         e.ai.warn = 0;
-        game.fx('mound', { x: e.x, y: e.y, color: e.tint });
+        game.fx('rubble', { x: e.x, y: 0.1, z: e.z });
       }
     }
-    separate(game, e, dt);
   },
 
-  /** Heavy melee: closes, winds up, slams an area. */
-  slammer(game, e, dt) {
+  /** Rooted spawner; also screams to pull the whole floor toward you. */
+  summoner(game, e, dt) {
+    const t = updateSenses(game, e, dt);
     const P = e.def.params;
-    const t = toPlayer(game, e);
-    if (e.ai.state === 'wind') {
-      e.ai.stateT -= dt;
-      e.vx *= Math.pow(0.02, dt);
-      e.vy *= Math.pow(0.02, dt);
-      applyMove(game, e, dt);
-      e.ai.telegraph = e.ai.stateT / P.windup;
-      if (e.ai.stateT <= 0) {
-        e.ai.state = 'rest';
-        e.ai.stateT = P.cooldown;
-        e.ai.telegraph = 0;
-        game.spawnShockwave(e.x, e.y, {
-          radius: P.slamRadius,
-          damage: P.slamDamage,
-          team: TEAM.ENEMY,
-          color: e.tint,
-        });
-        game.shake(6, 0.25);
-        game.sfx('bossSlam');
-        if (P.ringShot) {
-          for (let i = 0; i < P.ringShot; i++) {
-            fireShot(game, e, (i / P.ringShot) * Math.PI * 2, {
-              speed: 130,
-              damage: 1,
-              kind: 'shrapnel',
-              life: 2.2,
-            });
-          }
-        }
-      }
-    } else {
-      e.ai.stateT -= dt;
-      const ang = Math.atan2(t.ny, t.nx);
-      steer(game, e, dt, Math.cos(ang), Math.sin(ang), e.speed, 180);
-      if (t.d < P.range && e.ai.stateT <= 0) {
-        e.ai.state = 'wind';
-        e.ai.stateT = P.windup;
-        game.fx('telegraph', { x: e.x, y: e.y, time: P.windup, color: e.tint, radius: P.slamRadius });
-      }
-    }
-    separate(game, e, dt);
-    e.facing = Math.sign(t.nx) || e.facing;
-  },
+    e.vx = e.vz = 0;
+    e.yaw += angleDelta(e.yaw, Math.atan2(t.dx, t.dz)) * Math.min(1, dt * 2);
+    if (e.ai.state !== 'hunt') return;
 
-  /** Circles as a pack, taking turns to strike. */
-  packHunter(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    e.ai.strikeT -= dt;
-    if (e.ai.dashT > 0) {
-      e.ai.dashT -= dt;
-      applyMove(game, e, dt);
-      if (game.rng.chance(dt * 10)) game.fx('trail', { x: e.x, y: e.y, color: e.tint });
-    } else if (e.ai.strikeT <= 0 && game.claimPackToken(e)) {
-      e.ai.strikeT = P.strikeEvery * game.enemyFireScale;
-      e.ai.dashT = P.dashTime;
-      e.vx = t.nx * P.dashSpeed;
-      e.vy = t.ny * P.dashSpeed;
-      game.sfx('dash', { gain: 0.35 });
-      if (P.howl) game.sfx('bossRoar', { gain: 0.25, rate: 1.6 });
-    } else {
-      e.ai.orbitA = (e.ai.orbitA || e.seedPhase) + dt * 1.1 * e.ai.orbitDir;
-      const tx = t.p.x + Math.cos(e.ai.orbitA) * P.circle;
-      const ty = t.p.y + Math.sin(e.ai.orbitA) * P.circle;
-      const dir = norm(tx - e.x, ty - e.y);
-      steer(game, e, dt, dir.x, dir.y, e.speed, 320);
-    }
-    separate(game, e, dt);
-    e.facing = Math.sign(t.nx) || e.facing;
-  },
-
-  /** Travels in straight lines and ricochets off geometry. */
-  bouncer(game, e, dt) {
-    const P = e.def.params;
-    if (!e.ai.init) {
-      e.ai.init = true;
-      const a = game.rng.angle();
-      e.vx = Math.cos(a) * P.speed;
-      e.vy = Math.sin(a) * P.speed;
-      e.bounceWalls = true;
-    }
-    const res = applyMove(game, e, dt);
-    if (res.hitX || res.hitY) {
-      game.fx('impact', { x: e.x, y: e.y, color: e.tint });
-      game.sfx('block', { gain: 0.3 });
-    }
-    e.spin = (e.spin || 0) + dt * 6;
-    tickShooting(game, e, dt);
-  },
-
-  /** Rooted eruption trap: marks the ground, then erupts. */
-  geyser(game, e, dt) {
-    const P = e.def.params;
-    e.vx = e.vy = 0;
-    e.ai.spawnT -= dt;
-    if (e.ai.marks && e.ai.marks.length) {
-      e.ai.markT -= dt;
-      if (e.ai.markT <= 0) {
-        for (const m of e.ai.marks) {
-          game.spawnShockwave(m.x, m.y, { radius: P.radius, damage: P.damage, team: TEAM.ENEMY, color: e.tint });
-          game.fx('eruption', { x: m.x, y: m.y, color: e.tint });
-        }
-        game.sfx('explode', { gain: 0.5, rate: 1.3 });
-        e.ai.marks = null;
-      }
-    } else if (e.ai.spawnT <= 0) {
-      e.ai.spawnT = P.every * game.enemyFireScale;
-      e.ai.markT = P.warn;
-      e.ai.marks = [];
-      const p = game.player;
-      for (let i = 0; i < P.count; i++) {
-        const a = game.rng.angle();
-        const r = i === 0 ? 0 : game.rng.range(30, 90);
-        e.ai.marks.push({
-          x: clamp(p.x + Math.cos(a) * r, TILE, ROOM_MAX_X - TILE),
-          y: clamp(p.y + Math.sin(a) * r, TILE, ROOM_MAX_Y - TILE),
-        });
-      }
-      for (const m of e.ai.marks) game.fx('telegraph', { x: m.x, y: m.y, time: P.warn, color: e.tint, radius: P.radius });
-    }
-  },
-
-  /** Strafes in wide arcs while spitting spiral patterns. */
-  dancer(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    e.ai.orbitA = (e.ai.orbitA || e.seedPhase) + dt * P.strafe * e.ai.orbitDir;
-    if (game.rng.chance(dt * 0.35)) e.ai.orbitDir *= -1;
-    const tx = t.p.x + Math.cos(e.ai.orbitA) * P.keep;
-    const ty = t.p.y + Math.sin(e.ai.orbitA) * P.keep;
-    const dir = norm(tx - e.x, ty - e.y);
-    steer(game, e, dt, dir.x, dir.y, e.speed, 340);
-    e.facing = Math.sign(t.nx) || e.facing;
-    tickShooting(game, e, dt);
-  },
-
-  /** Plays dead once, then gets back up at reduced health. */
-  reviver(game, e, dt) {
-    if (e.ai.downed) {
-      e.ai.reviveT -= dt;
-      e.invulnerable = true;
-      e.vx = e.vy = 0;
-      if (e.ai.reviveT <= 0) {
-        e.ai.downed = false;
-        e.invulnerable = false;
-        e.hp = Math.max(1, Math.floor(e.maxHp * e.def.params.reviveHp));
-        e.ai.revived = true;
-        game.fx('revive', { x: e.x, y: e.y, color: e.tint });
-        game.sfx('spawn', { rate: 0.7 });
+    if (e.ai.warnT > 0) {
+      e.ai.warnT -= dt;
+      e.telegraph = e.ai.warnT / P.warn;
+      if (e.ai.warnT <= 0) {
+        e.telegraph = 0;
+        game.spawnMinions(e, { id: P.spawn, count: P.count, max: P.max });
+        game.sfx('spawn', { x: e.x, y: e.y + 1, z: e.z });
+        if (P.alarm) game.alertNearby(e.x, e.z, 26);
       }
       return;
     }
-    BEHAVIORS.kiter(game, e, dt);
+    e.ai.spawnT -= dt;
+    if (e.ai.spawnT <= 0) {
+      e.ai.spawnT = P.every * game.enemyFireScale;
+      e.ai.warnT = P.warn;
+      game.sfx('screech', { x: e.x, y: e.y + 1.4, z: e.z, gain: 0.9 });
+    }
   },
 
-  /** Disguised as loot until the player gets close. */
+  /** Rooted trap that marks the ground before erupting. */
+  geyser(game, e, dt) {
+    const t = updateSenses(game, e, dt);
+    const P = e.def.params;
+    e.vx = e.vz = 0;
+    if (e.ai.marks) {
+      e.ai.markT -= dt;
+      if (e.ai.markT <= 0) {
+        for (const m of e.ai.marks) {
+          game.explode(m.x, 0.6, m.z, P.radius, P.damage, TEAM.ENEMY);
+        }
+        e.ai.marks = null;
+      }
+      return;
+    }
+    if (e.ai.state !== 'hunt') return;
+    e.ai.spawnT -= dt;
+    if (e.ai.spawnT <= 0) {
+      e.ai.spawnT = P.every * game.enemyFireScale;
+      e.ai.markT = P.warn;
+      e.ai.marks = [];
+      for (let i = 0; i < P.count; i++) {
+        const a = game.rng.angle();
+        const r = i === 0 ? 0 : game.rng.range(1.5, 4);
+        const x = t.p.x + Math.cos(a) * r;
+        const z = t.p.z + Math.sin(a) * r;
+        e.ai.marks.push({ x, z });
+        game.fx('telegraph', { x, y: 0.1, z, radius: P.radius, time: P.warn, color: [1, 0.45, 0.15] });
+      }
+      game.sfx('charge', { x: e.x, y: e.y, z: e.z, gain: 0.6 });
+    }
+  },
+
+  /** Disguised as treasure until you get close. */
   mimic(game, e, dt) {
     const P = e.def.params;
     const t = toPlayer(game, e);
     if (!e.ai.revealed) {
       e.disguised = true;
-      e.invulnerable = false;
-      e.vx = e.vy = 0;
+      e.vx = e.vz = 0;
       if (t.d < P.revealRange) {
         e.ai.revealed = true;
         e.disguised = false;
-        game.fx('reveal', { x: e.x, y: e.y, color: e.tint });
-        game.sfx('bossRoar', { gain: 0.3, rate: 1.8 });
-        e.vx = t.nx * P.lunge;
-        e.vy = t.ny * P.lunge;
-        e.ai.lungeT = 0.35;
+        e.ai.state = 'hunt';
+        e.aggro = 1;
+        game.sfx('screech', { x: e.x, y: e.y + 1, z: e.z, gain: 1 });
+        game.shake(0.6, 0.2);
+        e.vx = t.nx * P.lungeSpeed;
+        e.vz = t.nz * P.lungeSpeed;
+        e.ai.dashT = 0.4;
       }
       return;
     }
-    if (e.ai.lungeT > 0) {
-      e.ai.lungeT -= dt;
+    updateSenses(game, e, dt);
+    if (e.ai.dashT > 0) {
+      e.ai.dashT -= dt;
       applyMove(game, e, dt);
-      e.vx *= Math.pow(0.25, dt);
-      e.vy *= Math.pow(0.25, dt);
       return;
     }
-    e.ai.hopT -= dt;
-    if (e.ai.hopT <= 0) {
-      e.ai.hopT = 1.1;
-      e.ai.lungeT = 0.32;
-      e.vx = t.nx * P.lunge;
-      e.vy = t.ny * P.lunge;
-      if (P.slam) {
-        game.spawnShockwave(e.x, e.y, { radius: 60, damage: 2, team: TEAM.ENEMY, color: e.tint });
-      }
+    e.ai.strikeT -= dt;
+    if (e.ai.strikeT <= 0 && t.d < 9) {
+      e.ai.strikeT = 1.6;
+      e.ai.dashT = 0.4;
+      e.vx = t.nx * P.lungeSpeed;
+      e.vz = t.nz * P.lungeSpeed;
+      if (P.slam) game.explode(e.x, e.y + 0.5, e.z, 3, 3, TEAM.ENEMY);
     } else {
-      const ang = Math.atan2(t.ny, t.nx);
-      steer(game, e, dt, Math.cos(ang) * 0.5, Math.sin(ang) * 0.5, e.speed * 0.5, 200);
+      pathTowardPlayer(game, e, dt, e.speed * 0.7);
     }
     separate(game, e, dt);
   },
-
-  /** Anchors beams across the arena; the player must break the line. */
-  weaver(game, e, dt) {
-    const P = e.def.params;
-    const t = toPlayer(game, e);
-    e.ai.beamT -= dt;
-    if (e.ai.beam) {
-      e.ai.beam.time -= dt;
-      e.ai.beam.warn -= dt;
-      if (e.ai.beam.time <= 0) e.ai.beam = null;
-    } else if (e.ai.beamT <= 0) {
-      e.ai.beamT = P.beamEvery * game.enemyFireScale;
-      const beams = P.beams || 1;
-      e.ai.beam = { time: P.warn + P.beamTime, warn: P.warn, angles: [], damage: P.damage, beams };
-      const base = Math.atan2(t.ny, t.nx);
-      for (let i = 0; i < beams; i++) e.ai.beam.angles.push(base + (i / beams) * Math.PI * 2);
-      game.sfx('bossBeam', { gain: 0.4 });
-    }
-    // Drift slowly so beams sweep.
-    e.ai.orbitA = (e.ai.orbitA || e.seedPhase) + dt * 0.5;
-    const tx = t.p.x + Math.cos(e.ai.orbitA) * 150;
-    const ty = t.p.y + Math.sin(e.ai.orbitA) * 150;
-    const dir = norm(tx - e.x, ty - e.y);
-    e.vx = dir.x * e.speed;
-    e.vy = dir.y * e.speed;
-    applyMove(game, e, dt);
-
-    if (e.ai.beam && e.ai.beam.warn <= 0) {
-      for (const a of e.ai.beam.angles) {
-        game.beamDamage(e.x, e.y, a, 600, e.ai.beam.damage, TEAM.ENEMY, dt);
-      }
-    }
-  },
 };
 
-function nearestWallNormal(game, e) {
-  const tiles = game.room.tiles;
-  const probes = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 },
-  ];
-  for (const p of probes) {
-    if (circleBlocked(tiles, e.x + p.x * TILE * 1.1, e.y + p.y * TILE * 1.1, e.radius, walkOpts(e))) {
-      return p;
-    }
-  }
-  return null;
-}
-
 export function getBehavior(name) {
-  return BEHAVIORS[name] || BEHAVIORS.chaser;
+  return BEHAVIORS[name] || BEHAVIORS.stalker;
 }
-
-export { fireShot as enemyFireShot, toPlayer as aimAtPlayer, steer as steerEnemy, separate as separateEnemy, applyMove as moveEnemy };

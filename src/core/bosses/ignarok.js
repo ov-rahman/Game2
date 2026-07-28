@@ -1,260 +1,202 @@
 /**
  * Floor 4 boss — Игнарок, the lava maw.
  *
- * The arena is the weapon: Игнарок submerges, reshapes the floor with lava and
- * forces the player onto shrinking safe ground while geysers track them.
+ * The arena is the weapon: Игнарок reshapes the floor with lava and forces the
+ * player onto shrinking safe ground while geysers track them.
  */
-import { TEAM, TILE, ROOM_W, ROOM_H, T } from '../constants.js';
-import { makeBoss, checkPhase, moveToward, aimAt, radial, fan, bullet, chooseAttack, ARENA, telegraphAt } from './base.js';
-import { clamp } from '../math.js';
+import { TEAM, C, CELL } from '../constants.js';
+import { makeBoss, checkPhase, toPlayer, moveToward, faceTarget, radial, fan, bullet, chooseAttack, endAttack, groundStrike } from './base.js';
+import { SPRITE } from '../../data/sprite-ids.js';
 
-export function createIgnarok(game, x, y) {
+export function createIgnarok(game, x, z) {
   return makeBoss({
     id: 'ignarok',
-    name: 'Игнарок',
+    name: 'ИГНАРОК',
     title: 'лавовая пасть',
-    sprite: 'ignarok',
-    x,
-    y,
-    radius: 30,
-    hp: 720,
-    speed: 46,
-    touch: 3,
-    armor: 1,
+    art: 'ignarok',
+    x, z,
+    radius: 2.0,
+    hp: 1900,
+    speed: 2.6,
+    touch: 4,
+    armor: 2,
     phaseThresholds: [0.7, 0.35],
     update,
     onPhase(g, b, phase) {
-      if (phase === 2) g.message('Озеро вскипает', '', 1.8);
+      if (phase === 2) g.message('ОЗЕРО ВСКИПАЕТ', '', 2);
       if (phase === 3) {
-        g.message('Игнарок выходит целиком', '', 2);
-        b.speed = 62;
+        g.message('ИГНАРОК ВЫХОДИТ ЦЕЛИКОМ', '', 2.2);
+        b.speed = 3.6;
       }
     },
   });
 }
 
-const ATTACKS_P1 = ['geyser', 'spew', 'dive'];
-const ATTACKS_P2 = ['geyser', 'spew', 'dive', 'lavaWave'];
-const ATTACKS_P3 = ['geyser', 'lavaWave', 'eruption', 'dive'];
+const P1 = ['geyser', 'spew', 'dive'];
+const P2 = ['geyser', 'spew', 'dive', 'lavaWave'];
+const P3 = ['geyser', 'lavaWave', 'eruption', 'dive'];
 
 function update(game, b, dt) {
   b.t += dt;
   checkPhase(game, b);
+  const t = toPlayer(game, b);
 
   if (b.attack) {
     b.attackT += dt;
-    runAttack(game, b, dt);
+    runAttack(game, b, dt, t);
     return;
   }
-
   b.cd -= dt;
-  const p = game.player;
-  // Circles the player rather than charging head-on.
-  b.mem.orbit = (b.mem.orbit || 0) + dt * 0.7 * (b.mem.dir || 1);
-  const tx = p.x + Math.cos(b.mem.orbit) * 140;
-  const ty = p.y + Math.sin(b.mem.orbit) * 100;
-  moveToward(b, tx, ty, b.speed, dt);
-  if (game.rng.chance(dt * 6)) game.fx('ember', { x: b.x + game.rng.range(-16, 16), y: b.y, color: '#ff5722' });
-
-  if (b.cd <= 0) {
-    const list = b.phase === 1 ? ATTACKS_P1 : b.phase === 2 ? ATTACKS_P2 : ATTACKS_P3;
-    chooseAttack(game, b, list);
+  // Circles rather than charging head-on.
+  b.mem.orbit = (b.mem.orbit || 0) + dt * 0.6;
+  moveToward(game, b, t.p.x + Math.cos(b.mem.orbit) * 7, t.p.z + Math.sin(b.mem.orbit) * 7, b.speed, dt);
+  if (game.rng.chance(dt * 8)) {
+    game.fx('ember', { x: b.x + game.rng.range(-1.5, 1.5), y: b.y + 0.8, z: b.z, color: [1, 0.45, 0.12] });
   }
+  if (b.cd <= 0) chooseAttack(game, b, b.phase === 1 ? P1 : b.phase === 2 ? P2 : P3);
 }
 
-function runAttack(game, b, dt) {
-  const T2 = b.attackT;
-  const p = game.player;
-
+function runAttack(game, b, dt, t) {
+  const T = b.attackT;
   switch (b.attack) {
-    // Tracking geysers: they mark where the player *is going*.
+    // Geysers marked where the player is *going*, not where they are.
     case 'geyser': {
       if (!b.mem.marks) {
-        b.mem.marks = [];
-        const n = 3 + b.phase;
+        b.mem.marks = true;
+        const n = 4 + b.phase;
+        const vx = (t.p.x - t.p.px) * 60;
+        const vz = (t.p.z - t.p.pz) * 60;
         for (let i = 0; i < n; i++) {
-          const lead = 0.35 + i * 0.12;
-          const x = clamp(p.x + (p.x - p.px) * 60 * lead, ARENA.minX, ARENA.maxX);
-          const y = clamp(p.y + (p.y - p.py) * 60 * lead, ARENA.minY, ARENA.maxY);
-          const at = 0.5 + i * 0.2;
-          b.mem.marks.push({ x, y, at, fired: false });
-          telegraphAt(game, x, y, at, 38, '#ff5722');
+          const lead = 0.3 + i * 0.16;
+          groundStrike(game, b, t.p.x + vx * lead, t.p.z + vz * lead, 2.6, 3, 0.5 + i * 0.22, [1, 0.45, 0.15]);
         }
-        game.sfx('charge', { gain: 0.5, rate: 0.8 });
+        game.sfx('charge', { x: b.x, y: b.y + 1, z: b.z, rate: 0.8 });
       }
-      let remaining = false;
-      for (const m of b.mem.marks) {
-        if (m.fired) continue;
-        if (T2 >= m.at) {
-          m.fired = true;
-          game.spawnShockwave(m.x, m.y, { radius: 42, damage: 2, team: TEAM.ENEMY, color: '#ff5722' });
-          game.spawnGoo(m.x, m.y, { radius: 22, time: 3.5, damage: 1, kind: 'lava' });
-          game.fx('eruption', { x: m.x, y: m.y, color: '#ff9040' });
-          game.sfx('explode', { gain: 0.45, rate: 1.2 });
-        } else {
-          remaining = true;
-        }
-      }
-      if (!remaining || T2 > 3) {
-        b.mem.marks = null;
-        endAttack(b, 1.0);
+      if (T > 2.6) {
+        b.mem.marks = false;
+        endAttack(b, 1.2);
       }
       break;
     }
 
-    // Wide spew of arcing magma globs that leave pools.
+    // Arcing magma globs that leave burning pools.
     case 'spew': {
-      if (T2 < 0.6) {
-        b.ai.telegraph = 1 - T2 / 0.6;
+      if (T < 0.6) {
+        b.telegraph = 1 - T / 0.6;
+        faceTarget(b, t, dt, 5);
         break;
       }
-      b.ai.telegraph = 0;
+      b.telegraph = 0;
       b.mem.spewT = (b.mem.spewT || 0) - dt;
-      if (b.mem.spewT <= 0 && T2 < 2.2) {
-        b.mem.spewT = 0.3;
-        const shots = fan(game, b, aimAt(b, p), 4 + b.phase, 1.0, {
-          speed: 150,
-          damage: 1,
-          color: '#ff7a2f',
-          radius: 7,
-          burn: 1,
-          style: 'magma',
-        });
+      if (b.mem.spewT <= 0 && T < 2.4) {
+        b.mem.spewT = 0.35;
+        for (let i = 0; i < 4 + b.phase; i++) {
+          const s = bullet(game, b, Math.atan2(t.dx, t.dz) + game.rng.range(-0.6, 0.6), {
+            speed: 13, damage: 2, burn: 1, gravity: 7, vy: 4.5, color: [1, 0.5, 0.15], sprite: SPRITE.FLAME,
+          });
+          if (s) s.puddle = { radius: 2.2, time: 5, damage: 2, fire: true };
+        }
       }
-      if (T2 > 2.5) {
+      if (T > 2.7) {
         b.mem.spewT = 0;
-        endAttack(b, 1.0);
+        endAttack(b, 1.2);
       }
       break;
     }
 
     // Submerge, become untargetable, erupt beneath the player.
     case 'dive': {
-      if (T2 < 0.5) {
-        b.ai.telegraph = 1 - T2 / 0.5;
-        b.alpha = 1 - T2 / 0.5;
+      if (T < 0.5) {
+        b.telegraph = 1 - T / 0.5;
         break;
       }
-      if (T2 < 1.5) {
+      if (T < 1.6) {
         b.invulnerable = true;
         b.hidden = true;
-        b.alpha = 0;
-        moveToward(b, p.x, p.y, 260, dt);
-        if (game.rng.chance(dt * 18)) game.fx('mound', { x: b.x, y: b.y, color: '#ff5722' });
-        if (T2 > 1.2 && !b.mem.dived) {
+        moveToward(game, b, t.p.x, t.p.z, 11, dt);
+        if (game.rng.chance(dt * 20)) game.fx('rubble', { x: b.x, y: 0.1, z: b.z });
+        if (T > 1.3 && !b.mem.dived) {
           b.mem.dived = true;
-          telegraphAt(game, b.x, b.y, 0.3, 68, '#ff5722');
+          game.fx('telegraph', { x: b.x, y: 0.1, z: b.z, radius: 4.5, time: 0.3, color: [1, 0.45, 0.15] });
         }
         break;
       }
       if (b.hidden) {
         b.hidden = false;
         b.invulnerable = false;
-        b.alpha = 1;
-        game.spawnShockwave(b.x, b.y, { radius: 74, damage: 2, team: TEAM.ENEMY, color: '#ff9040' });
-        radial(game, b, 10, { speed: 165, damage: 1, color: '#ffc93c', radius: 6, style: 'magma' });
-        game.shake(9, 0.35);
-        game.sfx('explode');
+        game.explode(b.x, b.y + 0.6, b.z, 5, 4, TEAM.ENEMY);
+        radial(game, b, 12, { speed: 14, damage: 2, color: [1, 0.7, 0.25] });
+        game.shake(1.6, 0.4);
+        game.sfx('explode', { x: b.x, y: b.y, z: b.z });
       }
-      if (T2 > 2.1) {
+      if (T > 2.3) {
         b.mem.dived = false;
-        endAttack(b, 1.1);
-      }
-      break;
-    }
-
-    // A wall of lava sweeps across the arena with one gap.
-    case 'lavaWave': {
-      if (T2 < 0.9) {
-        b.ai.telegraph = 1 - T2 / 0.9;
-        if (!b.mem.waveSide) {
-          b.mem.waveSide = game.rng.int(0, 3);
-          b.mem.gap = game.rng.range(0.25, 0.75);
-          const horizontal = b.mem.waveSide % 2 === 0;
-          for (let i = 0; i < 8; i++) {
-            const f = i / 7;
-            if (Math.abs(f - b.mem.gap) < 0.16) continue;
-            const x = horizontal ? ARENA.minX + f * (ARENA.maxX - ARENA.minX) : b.mem.waveSide === 1 ? ARENA.maxX : ARENA.minX;
-            const y = horizontal ? (b.mem.waveSide === 0 ? ARENA.minY : ARENA.maxY) : ARENA.minY + f * (ARENA.maxY - ARENA.minY);
-            telegraphAt(game, x, y, 0.9, 26, '#ff4b12');
-          }
-        }
-        break;
-      }
-      b.ai.telegraph = 0;
-      if (!b.mem.waveFired) {
-        b.mem.waveFired = true;
-        const horizontal = b.mem.waveSide % 2 === 0;
-        const dir = b.mem.waveSide === 0 ? Math.PI / 2 : b.mem.waveSide === 2 ? -Math.PI / 2 : b.mem.waveSide === 1 ? Math.PI : 0;
-        for (let i = 0; i < 14; i++) {
-          const f = i / 13;
-          if (Math.abs(f - b.mem.gap) < 0.14) continue;
-          const x = horizontal ? ARENA.minX + f * (ARENA.maxX - ARENA.minX) : b.mem.waveSide === 1 ? ARENA.maxX : ARENA.minX;
-          const y = horizontal ? (b.mem.waveSide === 0 ? ARENA.minY : ARENA.maxY) : ARENA.minY + f * (ARENA.maxY - ARENA.minY);
-          bullet(game, b, x, y, dir, {
-            speed: 120,
-            damage: 2,
-            color: '#ff4b12',
-            radius: 9,
-            life: 5,
-            burn: 1,
-            style: 'wave',
-          });
-        }
-        game.sfx('fire', { gain: 0.8 });
-        game.shake(5, 0.3);
-      }
-      if (T2 > 2.0) {
-        b.mem.waveSide = 0;
-        b.mem.waveFired = false;
         endAttack(b, 1.3);
       }
       break;
     }
 
-    // Phase 3: standing eruption — dense spiral plus pools everywhere.
-    case 'eruption': {
-      if (T2 < 1.0) {
-        b.ai.telegraph = 1 - T2 / 1.0;
-        moveToward(b, ARENA.cx, ARENA.cy, 90, dt);
+    // A wall of lava sweeps across with a single gap.
+    case 'lavaWave': {
+      if (T < 0.9) {
+        b.telegraph = 1 - T / 0.9;
+        if (!b.mem.wave) {
+          b.mem.wave = { a: Math.atan2(t.dx, t.dz), gap: game.rng.range(-3, 3) };
+        }
         break;
       }
-      b.ai.telegraph = 0;
+      b.telegraph = 0;
+      if (!b.mem.waveFired) {
+        b.mem.waveFired = true;
+        const a = b.mem.wave.a;
+        const px = Math.cos(a);
+        const pz = -Math.sin(a);
+        for (let i = -7; i <= 7; i++) {
+          if (Math.abs(i - b.mem.wave.gap) < 1.6) continue;
+          const s = bullet(game, b, a, {
+            speed: 10, damage: 3, burn: 1, life: 6, radius: 0.4, color: [1, 0.4, 0.12], sprite: SPRITE.FLAME,
+          });
+          if (s) {
+            s.x = s.px = b.x + px * i * 1.5;
+            s.z = s.pz = b.z + pz * i * 1.5;
+          }
+        }
+        game.sfx('fire', { x: b.x, y: b.y, z: b.z, gain: 1 });
+        game.shake(0.8, 0.35);
+      }
+      if (T > 2.0) {
+        b.mem.wave = null;
+        b.mem.waveFired = false;
+        endAttack(b, 1.4);
+      }
+      break;
+    }
+
+    // Phase 3 spectacle: dense spiral plus pools everywhere.
+    case 'eruption': {
+      if (T < 1.0) {
+        b.telegraph = 1 - T / 1.0;
+        break;
+      }
+      b.telegraph = 0;
       b.mem.erT = (b.mem.erT || 0) - dt;
-      if (b.mem.erT <= 0 && T2 < 4.0) {
-        b.mem.erT = 0.2;
-        radial(game, b, 9, {
-          offset: b.t * 2.6,
-          speed: 140,
-          damage: 1,
-          color: '#ffc93c',
-          radius: 6,
-          style: 'magma',
-        });
+      if (b.mem.erT <= 0 && T < 4.2) {
+        b.mem.erT = 0.24;
+        radial(game, b, 10, { offset: b.t * 2.6, speed: 12, damage: 2, color: [1, 0.7, 0.25] });
         if (game.rng.chance(0.5)) {
-          const x = game.rng.range(ARENA.minX, ARENA.maxX);
-          const y = game.rng.range(ARENA.minY, ARENA.maxY);
-          game.spawnGoo(x, y, { radius: 20, time: 4, damage: 1, kind: 'lava' });
+          game.spawnPuddle(t.p.x + game.rng.range(-8, 8), t.p.z + game.rng.range(-8, 8), {
+            radius: 2.2, time: 5, damage: 2, fire: true,
+          });
         }
       }
-      if (T2 > 4.5) {
+      if (T > 4.6) {
         b.mem.erT = 0;
-        endAttack(b, 1.6);
+        endAttack(b, 1.7);
       }
       break;
     }
 
     default:
-      endAttack(b, 1);
+      endAttack(b, 1.2);
   }
-}
-
-function endAttack(b, cd) {
-  b.attack = null;
-  b.attackT = 0;
-  b.ai.telegraph = 0;
-  b.hidden = false;
-  b.invulnerable = false;
-  b.alpha = 1;
-  b.cd = cd;
 }

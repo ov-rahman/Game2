@@ -1,59 +1,71 @@
 /**
- * Browser display adapter.
+ * Browser display adapter: owns the canvas, the WebGL2 context, offscreen 2D
+ * surfaces for procedural texture painting, resizing and fullscreen.
  *
- * Owns the canvas element, the integer upscale from the logical resolution to
- * the window, offscreen surface creation for sprite atlases, and fullscreen.
+ * A desktop shell swaps this file; the renderer above it is unchanged.
  */
-import { VIEW_W, VIEW_H } from '../../core/constants.js';
-
 export function createBrowserDisplay(canvas, opts = {}) {
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-  canvas.width = VIEW_W;
-  canvas.height = VIEW_H;
-  ctx.imageSmoothingEnabled = false;
+  const gl = canvas.getContext('webgl2', {
+    alpha: false,
+    antialias: false, // the look is deliberately aliased; MSAA would fight it
+    depth: true,
+    stencil: false,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: !!opts.preserveDrawingBuffer,
+    desynchronized: true,
+  });
 
-  const container = opts.container || canvas.parentElement || document.body;
-  let scale = 1;
+  if (!gl) {
+    throw new Error('WebGL2 недоступен. Нужен браузер с поддержкой WebGL 2.0.');
+  }
+
   const resizeHandlers = [];
+  let width = 0;
+  let height = 0;
 
-  function computeScale() {
-    const availW = window.innerWidth;
-    const availH = window.innerHeight;
-    // Integer scaling keeps the hand-drawn pixels crisp; fall back to a
-    // fractional scale only on windows too small for 1x.
-    let s = Math.min(availW / VIEW_W, availH / VIEW_H);
-    s = s >= 1 ? Math.floor(s) : s;
-    return Math.max(s, 0.35);
+  // Cap the backbuffer: the scene renders at a low internal resolution anyway,
+  // so a 4K backbuffer would only make the final upscale blit expensive.
+  const maxPixels = opts.maxPixels || 2_400_000;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let w = Math.max(320, Math.floor(window.innerWidth * dpr));
+    let h = Math.max(180, Math.floor(window.innerHeight * dpr));
+    const pixels = w * h;
+    if (pixels > maxPixels) {
+      const k = Math.sqrt(maxPixels / pixels);
+      w = Math.floor(w * k);
+      h = Math.floor(h * k);
+    }
+    if (w === width && h === height) return;
+    width = w;
+    height = h;
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    for (const fn of resizeHandlers) fn(w, h);
   }
 
-  function applyScale() {
-    scale = computeScale();
-    const w = Math.round(VIEW_W * scale);
-    const h = Math.round(VIEW_H * scale);
-    canvas.style.width = `${w}px`;
-    canvas.style.height = `${h}px`;
-    for (const fn of resizeHandlers) fn(VIEW_W, VIEW_H, scale);
-  }
+  window.addEventListener('resize', resize);
+  resize();
 
-  window.addEventListener('resize', applyScale);
-  applyScale();
-
-  const fsTarget = container === document.body ? document.documentElement : container;
-
+  const fsTarget = canvas.parentElement || document.documentElement;
   function onFsChange() {
-    applyScale();
+    resize();
   }
   document.addEventListener('fullscreenchange', onFsChange);
 
   return {
     name: 'browser-display',
     canvas,
+    gl,
 
-    target() {
-      return { ctx, width: VIEW_W, height: VIEW_H, scale };
+    size() {
+      return { width, height };
     },
 
-    /** Offscreen surface for baking sprite atlases and cached backgrounds. */
+    /** Offscreen 2D surface used to paint procedural textures. */
     createSurface(w, h, surfaceOpts = {}) {
       let surface;
       if (typeof OffscreenCanvas !== 'undefined' && opts.allowOffscreen !== false) {
@@ -63,16 +75,9 @@ export function createBrowserDisplay(canvas, opts = {}) {
         surface.width = w;
         surface.height = h;
       }
-      // Atlas baking reads pixels back to build sprite outlines; telling the
-      // browser up front avoids a per-call de-optimisation warning.
-      const sctx = surface.getContext('2d', { willReadFrequently: !!surfaceOpts.readback });
-      sctx.imageSmoothingEnabled = false;
-      return { canvas: surface, ctx: sctx, width: w, height: h };
-    },
-
-    /** Convert a canvas-space point to logical view space. */
-    toLogical(p) {
-      return { x: p.x, y: p.y };
+      const ctx = surface.getContext('2d', { willReadFrequently: !!surfaceOpts.readback });
+      ctx.imageSmoothingEnabled = surfaceOpts.smooth !== false;
+      return { canvas: surface, ctx, width: w, height: h };
     },
 
     isFullscreen() {
@@ -89,11 +94,11 @@ export function createBrowserDisplay(canvas, opts = {}) {
 
     onResize(fn) {
       resizeHandlers.push(fn);
-      fn(VIEW_W, VIEW_H, scale);
+      fn(width, height);
     },
 
     dispose() {
-      window.removeEventListener('resize', applyScale);
+      window.removeEventListener('resize', resize);
       document.removeEventListener('fullscreenchange', onFsChange);
       resizeHandlers.length = 0;
     },

@@ -1,137 +1,157 @@
 /**
- * Tile collision and movement resolution.
+ * Grid collision and visibility.
  *
- * Entities are circles; tiles are axis-aligned squares. Movement is resolved one
- * axis at a time, which gives the "slide along the wall" feel players expect and
- * costs a handful of array lookups per entity per tick.
+ * Bodies are vertical cylinders; the world is a cell grid. Movement resolves one
+ * axis at a time, which gives the wall-sliding every first-person game needs and
+ * costs a handful of array reads per body per tick.
  */
-import { TILE, ROOM_W, ROOM_H, T } from '../constants.js';
+import { CELL, C, GRID_W, GRID_H } from '../constants.js';
 
-export function tileAt(tiles, tx, ty) {
-  if (tx < 0 || ty < 0 || tx >= ROOM_W || ty >= ROOM_H) return T.WALL;
-  return tiles[ty * ROOM_W + tx];
-}
-
-export function tileAtWorld(tiles, x, y) {
-  return tileAt(tiles, Math.floor(x / TILE), Math.floor(y / TILE));
-}
-
-/** Does this tile block the given mover? */
-export function blocks(tile, opts) {
-  if (tile === T.WALL) return true;
-  if (tile === T.ROCK) return !opts.ghost;
-  if (tile === T.PIT) return !opts.flying;
+export function solidFor(cell, opts) {
+  if (cell === C.SOLID) return true;
+  if (cell === C.RUBBLE) return !opts.ghost;
+  if (cell === C.PIT) return !opts.flying;
   return false;
 }
 
-/** True when a circle at (x,y) overlaps any blocking tile. */
-export function circleBlocked(tiles, x, y, r, opts = {}) {
-  const x0 = Math.floor((x - r) / TILE);
-  const x1 = Math.floor((x + r) / TILE);
-  const y0 = Math.floor((y - r) / TILE);
-  const y1 = Math.floor((y + r) / TILE);
-  for (let ty = y0; ty <= y1; ty++) {
-    for (let tx = x0; tx <= x1; tx++) {
-      const t = tileAt(tiles, tx, ty);
-      if (!blocks(t, opts)) continue;
-      // Closest point on the tile to the circle centre.
-      const cx = Math.max(tx * TILE, Math.min(x, tx * TILE + TILE));
-      const cy = Math.max(ty * TILE, Math.min(y, ty * TILE + TILE));
+export function cellAt(cells, gx, gy) {
+  if (gx < 0 || gy < 0 || gx >= GRID_W || gy >= GRID_H) return C.SOLID;
+  return cells[gy * GRID_W + gx];
+}
+
+export function cellAtWorld(cells, x, z) {
+  return cellAt(cells, Math.floor(x / CELL), Math.floor(z / CELL));
+}
+
+/** Does a cylinder of radius r centred at (x,z) overlap anything solid? */
+export function blocked(cells, x, z, r, opts = {}) {
+  const x0 = Math.floor((x - r) / CELL);
+  const x1 = Math.floor((x + r) / CELL);
+  const z0 = Math.floor((z - r) / CELL);
+  const z1 = Math.floor((z + r) / CELL);
+  for (let gy = z0; gy <= z1; gy++) {
+    for (let gx = x0; gx <= x1; gx++) {
+      if (!solidFor(cellAt(cells, gx, gy), opts)) continue;
+      // Closest point on the cell box to the circle centre.
+      const cx = Math.max(gx * CELL, Math.min(x, gx * CELL + CELL));
+      const cz = Math.max(gy * CELL, Math.min(z, gy * CELL + CELL));
       const dx = x - cx;
-      const dy = y - cy;
-      if (dx * dx + dy * dy < r * r) return true;
+      const dz = z - cz;
+      if (dx * dx + dz * dz < r * r) return true;
     }
   }
   return false;
 }
 
 /**
- * Move an entity by (dx,dy) against the tile grid.
- * Mutates e.x / e.y. Returns which axes were blocked.
+ * Move a body by (dx,dz), sliding along whatever it hits.
+ * Mutates body.x / body.z. Returns which axes were blocked.
  */
-export function moveEntity(tiles, e, dx, dy, opts = {}) {
-  const r = e.radius;
+export function moveBody(cells, body, dx, dz, opts = {}) {
+  const r = body.radius;
   let hitX = false;
-  let hitY = false;
+  let hitZ = false;
 
   if (dx !== 0) {
-    const nx = e.x + dx;
-    if (circleBlocked(tiles, nx, e.y, r, opts)) {
+    const nx = body.x + dx;
+    if (blocked(cells, nx, body.z, r, opts)) {
       hitX = true;
-      // Nudge flush against the wall so the entity does not float a pixel away.
-      const step = Math.sign(dx);
-      let probe = e.x;
-      for (let i = 0; i < Math.abs(dx); i++) {
-        if (circleBlocked(tiles, probe + step, e.y, r, opts)) break;
+      // Creep up to the wall so the body ends flush instead of a gap away.
+      const step = Math.sign(dx) * 0.05;
+      let probe = body.x;
+      for (let i = 0; i < 20; i++) {
+        if (blocked(cells, probe + step, body.z, r, opts)) break;
         probe += step;
       }
-      e.x = probe;
+      body.x = probe;
     } else {
-      e.x = nx;
+      body.x = nx;
     }
   }
 
-  if (dy !== 0) {
-    const ny = e.y + dy;
-    if (circleBlocked(tiles, e.x, ny, r, opts)) {
-      hitY = true;
-      const step = Math.sign(dy);
-      let probe = e.y;
-      for (let i = 0; i < Math.abs(dy); i++) {
-        if (circleBlocked(tiles, e.x, probe + step, r, opts)) break;
+  if (dz !== 0) {
+    const nz = body.z + dz;
+    if (blocked(cells, body.x, nz, r, opts)) {
+      hitZ = true;
+      const step = Math.sign(dz) * 0.05;
+      let probe = body.z;
+      for (let i = 0; i < 20; i++) {
+        if (blocked(cells, body.x, probe + step, r, opts)) break;
         probe += step;
       }
-      e.y = probe;
+      body.z = probe;
     } else {
-      e.y = ny;
+      body.z = nz;
     }
   }
 
-  // Safety clamp: never let anything escape the room box.
-  const lo = TILE * 0.5;
-  if (e.x < lo) e.x = lo;
-  if (e.y < lo) e.y = lo;
-  const hiX = ROOM_W * TILE - lo;
-  const hiY = ROOM_H * TILE - lo;
-  if (e.x > hiX) e.x = hiX;
-  if (e.y > hiY) e.y = hiY;
-
-  return { hitX, hitY };
+  return { hitX, hitZ };
 }
 
-/** Line-of-sight over blocking tiles (Bresenham-ish sampling, cheap). */
-export function hasLineOfSight(tiles, ax, ay, bx, by, opts = {}) {
+/**
+ * DDA ray march across the grid.
+ * Returns { hit, x, z, dist, gx, gy, cell } — hit is false if it reached maxDist.
+ */
+export function raycast(cells, ox, oz, dx, dz, maxDist, opts = {}) {
+  const len = Math.hypot(dx, dz) || 1;
+  const rx = dx / len;
+  const rz = dz / len;
+
+  let gx = Math.floor(ox / CELL);
+  let gy = Math.floor(oz / CELL);
+
+  const stepX = rx > 0 ? 1 : -1;
+  const stepZ = rz > 0 ? 1 : -1;
+  const tDeltaX = Math.abs(rx) < 1e-8 ? Infinity : Math.abs(CELL / rx);
+  const tDeltaZ = Math.abs(rz) < 1e-8 ? Infinity : Math.abs(CELL / rz);
+
+  let tMaxX =
+    rx > 0 ? ((gx + 1) * CELL - ox) / (rx || 1e-8) : (gx * CELL - ox) / (rx || -1e-8);
+  let tMaxZ =
+    rz > 0 ? ((gy + 1) * CELL - oz) / (rz || 1e-8) : (gy * CELL - oz) / (rz || -1e-8);
+  if (!isFinite(tMaxX)) tMaxX = Infinity;
+  if (!isFinite(tMaxZ)) tMaxZ = Infinity;
+
+  let t = 0;
+  for (let i = 0; i < 512; i++) {
+    const cell = cellAt(cells, gx, gy);
+    if (solidFor(cell, opts) && t > 0.001) {
+      return { hit: true, x: ox + rx * t, z: oz + rz * t, dist: t, gx, gy, cell };
+    }
+    if (t > maxDist) break;
+    if (tMaxX < tMaxZ) {
+      t = tMaxX;
+      tMaxX += tDeltaX;
+      gx += stepX;
+    } else {
+      t = tMaxZ;
+      tMaxZ += tDeltaZ;
+      gy += stepZ;
+    }
+  }
+  return { hit: false, x: ox + rx * maxDist, z: oz + rz * maxDist, dist: maxDist, gx, gy, cell: 0 };
+}
+
+export function hasLineOfSight(cells, ax, az, bx, bz, opts = {}) {
   const dx = bx - ax;
-  const dy = by - ay;
-  const len = Math.hypot(dx, dy);
-  const steps = Math.ceil(len / (TILE * 0.5));
-  if (steps === 0) return true;
-  for (let i = 1; i < steps; i++) {
-    const t = i / steps;
-    const x = ax + dx * t;
-    const y = ay + dy * t;
-    if (blocks(tileAtWorld(tiles, x, y), opts)) return false;
-  }
-  return true;
+  const dz = bz - az;
+  const d = Math.hypot(dx, dz);
+  if (d < 0.01) return true;
+  const r = raycast(cells, ax, az, dx, dz, d, opts);
+  return !r.hit || r.dist >= d - 0.05;
 }
 
-/** Find a free spot near (x,y) for spawning. */
-export function findFreeSpot(tiles, x, y, r, rng, tries = 24) {
-  if (!circleBlocked(tiles, x, y, r)) return { x, y };
+/** Nearest walkable spot to (x,z), used when spawning. */
+export function findFreeSpot(cells, x, z, r, rng, tries = 32) {
+  if (!blocked(cells, x, z, r)) return { x, z };
   for (let i = 0; i < tries; i++) {
     const a = rng.angle();
-    const d = TILE * (0.6 + i * 0.28);
+    const d = CELL * (0.5 + i * 0.22);
     const nx = x + Math.cos(a) * d;
-    const ny = y + Math.sin(a) * d;
-    if (nx < TILE || ny < TILE) continue;
-    if (nx > (ROOM_W - 1) * TILE || ny > (ROOM_H - 1) * TILE) continue;
-    if (!circleBlocked(tiles, nx, ny, r)) return { x: nx, y: ny };
+    const nz = z + Math.sin(a) * d;
+    if (nx < CELL || nz < CELL) continue;
+    if (nx > (GRID_W - 1) * CELL || nz > (GRID_H - 1) * CELL) continue;
+    if (!blocked(cells, nx, nz, r)) return { x: nx, z: nz };
   }
-  // Last resort: the room centre is guaranteed walkable by the generator.
-  return { x: (ROOM_W * TILE) / 2, y: (ROOM_H * TILE) / 2 };
-}
-
-/** Is the given world position standing on a hazard tile? */
-export function hazardAt(tiles, x, y) {
-  return tileAtWorld(tiles, x, y) === T.HAZARD;
+  return { x, z };
 }

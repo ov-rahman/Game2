@@ -1,11 +1,10 @@
 /**
- * Deterministic pseudo-random number generator.
+ * Seeded pseudo-random generator.
  *
- * A run is fully reproducible from its seed: every generator in the game draws
- * from an explicitly passed Rng instance, never from Math.random.
+ * Every generator in the game draws from an explicitly passed Rng, never from
+ * Math.random, so a run is reproducible from its seed.
  */
 
-/** Hash an arbitrary string into a 32-bit seed. */
 export function hashSeed(str) {
   let h = 2166136261 >>> 0;
   const s = String(str);
@@ -22,13 +21,12 @@ export class Rng {
     this.state = this.seed || 1;
   }
 
-  /** Fork a child generator so sub-systems cannot disturb each other's stream. */
+  /** Child stream, so sub-systems cannot disturb each other's sequence. */
   fork(tag = '') {
     return new Rng((this.nextU32() ^ hashSeed(tag)) >>> 0);
   }
 
   nextU32() {
-    // mulberry32
     this.state = (this.state + 0x6d2b79f5) >>> 0;
     let t = this.state;
     t = Math.imul(t ^ (t >>> 15), t | 1);
@@ -36,22 +34,18 @@ export class Rng {
     return (t ^ (t >>> 14)) >>> 0;
   }
 
-  /** Float in [0, 1). */
   next() {
     return this.nextU32() / 4294967296;
   }
 
-  /** Float in [min, max). */
   range(min, max) {
     return min + this.next() * (max - min);
   }
 
-  /** Integer in [min, max] inclusive. */
   int(min, max) {
     return min + Math.floor(this.next() * (max - min + 1));
   }
 
-  /** True with probability p. */
   chance(p) {
     return this.next() < p;
   }
@@ -60,7 +54,6 @@ export class Rng {
     return arr[Math.floor(this.next() * arr.length)];
   }
 
-  /** Pick using per-entry numeric weights. `weightOf` defaults to `e.weight`. */
   weighted(arr, weightOf = (e) => (e.weight == null ? 1 : e.weight)) {
     let total = 0;
     for (const e of arr) total += Math.max(0, weightOf(e));
@@ -73,7 +66,6 @@ export class Rng {
     return arr[arr.length - 1];
   }
 
-  /** In-place Fisher-Yates. Returns the same array. */
   shuffle(arr) {
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(this.next() * (i + 1));
@@ -84,13 +76,13 @@ export class Rng {
     return arr;
   }
 
-  /** Random unit vector. */
-  dir() {
-    const a = this.next() * Math.PI * 2;
-    return { x: Math.cos(a), y: Math.sin(a) };
-  }
-
   angle() {
     return this.next() * Math.PI * 2;
+  }
+
+  /** Random direction on the XZ plane. */
+  dir2d() {
+    const a = this.angle();
+    return { x: Math.cos(a), z: Math.sin(a) };
   }
 }

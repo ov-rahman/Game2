@@ -1,83 +1,79 @@
 /**
- * Browser input adapter: keyboard + mouse + gamepad -> InputSnapshot.
+ * Browser input: pointer-lock mouse look, keyboard, gamepad.
  *
- * Everything DOM-specific about controls lives here. The core only ever sees
- * the neutral snapshot described in ../interfaces.js.
+ * Everything host-specific about controls lives here. The core only ever sees
+ * the neutral snapshot from ../interfaces.js, so a desktop shell can feed it
+ * from a different source without touching gameplay code.
  */
 import { ACTIONS } from '../interfaces.js';
-import { norm } from '../../core/math.js';
 
-/** Physical key -> action. Multiple keys may map to the same action. */
 const KEYMAP = {
-  KeyW: 'up',
-  KeyS: 'down',
+  KeyW: 'forward',
+  ArrowUp: 'forward',
+  KeyS: 'back',
+  ArrowDown: 'back',
   KeyA: 'left',
+  ArrowLeft: 'left',
   KeyD: 'right',
-  ArrowUp: 'aimUp',
-  ArrowDown: 'aimDown',
-  ArrowLeft: 'aimLeft',
-  ArrowRight: 'aimRight',
-  Space: 'dash',
-  ShiftLeft: 'dash',
-  ShiftRight: 'dash',
-  KeyE: 'bomb',
+  ArrowRight: 'right',
+  ShiftLeft: 'sprint',
+  ShiftRight: 'sprint',
+  ControlLeft: 'crouch',
+  KeyC: 'crouch',
+  KeyE: 'interact',
   KeyQ: 'use',
-  KeyF: 'interact',
-  Enter: 'confirm',
-  NumpadEnter: 'confirm',
-  Escape: 'pause',
-  KeyP: 'pause',
+  KeyF: 'torch',
+  Space: 'fire',
   Tab: 'map',
   KeyM: 'map',
+  Escape: 'pause',
+  KeyP: 'pause',
+  Enter: 'confirm',
+  NumpadEnter: 'confirm',
   Backspace: 'cancel',
   F11: 'fullscreen',
   KeyR: 'restart',
   Backquote: 'debug',
 };
 
-/** Gamepad button index -> action (standard mapping). */
 const PADMAP = {
-  0: 'confirm', // A
-  1: 'cancel', // B
-  2: 'bomb', // X
-  3: 'use', // Y
-  4: 'map', // LB
-  5: 'dash', // RB
-  6: 'dash', // LT
-  7: 'fire', // RT
-  9: 'pause', // start
-  12: 'up',
-  13: 'down',
-  14: 'left',
-  15: 'right',
+  0: 'confirm',
+  1: 'cancel',
+  2: 'interact',
+  3: 'use',
+  4: 'map',
+  5: 'torch',
+  6: 'crouch',
+  7: 'fire',
+  9: 'pause',
+  10: 'sprint',
 };
 
-const DEADZONE = 0.28;
+const DEADZONE = 0.22;
 
 export function createBrowserInput(canvas, opts = {}) {
-  const target = opts.keyTarget || window;
   const down = Object.create(null);
   const pressed = Object.create(null);
-  const consumed = Object.create(null);
+  const padHeld = Object.create(null);
   for (const a of ACTIONS) {
     down[a] = false;
     pressed[a] = false;
   }
 
-  let pointerScreen = null; // {x,y} in CSS pixels relative to canvas
-  let pointerWorld = null;
-  let pointerActive = false;
-  let mapPointer = (p) => p;
-  let mouseDown = false;
-  let lastPadTimestamps = [];
+  let lookX = 0;
+  let lookY = 0;
+  let sensitivity = opts.sensitivity || 0.0022;
+  let padSensitivity = opts.padSensitivity || 0.045;
+  let locked = false;
+  let invertY = false;
 
   const snapshot = {
-    move: { x: 0, y: 0 },
-    shoot: { x: 0, y: 0 },
-    shooting: false,
-    pointer: null,
+    move: { x: 0, z: 0 },
+    look: { dx: 0, dy: 0 },
     down,
     pressed,
+    pointerLocked: false,
+    gamepad: false,
     anyPressed: false,
   };
 
@@ -89,12 +85,11 @@ export function createBrowserInput(canvas, opts = {}) {
 
   function onKeyDown(e) {
     const action = KEYMAP[e.code];
-    if (action) {
-      // Tab/Space/arrows would otherwise scroll or move focus.
-      if (e.code === 'Tab' || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
-      if (e.repeat) return;
-      setAction(action, true);
-    }
+    if (!action) return;
+    // These would otherwise scroll the page or move focus out of the canvas.
+    if (e.code === 'Tab' || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+    if (e.repeat) return;
+    setAction(action, true);
   }
 
   function onKeyUp(e) {
@@ -104,39 +99,35 @@ export function createBrowserInput(canvas, opts = {}) {
 
   function onBlur() {
     for (const a of ACTIONS) down[a] = false;
-    mouseDown = false;
-  }
-
-  function updatePointerFromEvent(e) {
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    pointerScreen = {
-      x: ((e.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((e.clientY - rect.top) / rect.height) * canvas.height,
-    };
-    pointerActive = true;
   }
 
   function onMouseMove(e) {
-    updatePointerFromEvent(e);
+    if (!locked) return;
+    lookX += e.movementX * sensitivity;
+    lookY += e.movementY * sensitivity * (invertY ? -1 : 1);
   }
 
   function onMouseDown(e) {
-    updatePointerFromEvent(e);
-    if (e.button === 0) {
-      mouseDown = true;
-      setAction('fire', true);
-    } else if (e.button === 2) {
-      setAction('bomb', true);
-    }
+    if (!locked) return;
+    if (e.button === 0) setAction('fire', true);
+    else if (e.button === 2) setAction('altFire', true);
+    e.preventDefault();
   }
 
   function onMouseUp(e) {
-    if (e.button === 0) {
-      mouseDown = false;
-      setAction('fire', false);
-    } else if (e.button === 2) {
-      setAction('bomb', false);
+    if (e.button === 0) setAction('fire', false);
+    else if (e.button === 2) setAction('altFire', false);
+  }
+
+  function onWheel(e) {
+    if (locked) e.preventDefault();
+  }
+
+  function onLockChange() {
+    locked = document.pointerLockElement === canvas;
+    if (!locked) {
+      // Dropping the lock must not leave movement keys stuck down.
+      for (const a of ACTIONS) down[a] = false;
     }
   }
 
@@ -144,124 +135,80 @@ export function createBrowserInput(canvas, opts = {}) {
     e.preventDefault();
   }
 
-  function onTouchStart(e) {
-    if (!e.touches.length) return;
-    updatePointerFromEvent(e.touches[0]);
-    mouseDown = true;
-    setAction('fire', true);
-  }
-  function onTouchMove(e) {
-    if (!e.touches.length) return;
-    updatePointerFromEvent(e.touches[0]);
-    e.preventDefault();
-  }
-  function onTouchEnd() {
-    mouseDown = false;
-    setAction('fire', false);
-  }
-
-  target.addEventListener('keydown', onKeyDown);
-  target.addEventListener('keyup', onKeyUp);
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
-  canvas.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mousemove', onMouseMove);
   canvas.addEventListener('mousedown', onMouseDown);
   window.addEventListener('mouseup', onMouseUp);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);
-  canvas.addEventListener('touchstart', onTouchStart, { passive: true });
-  canvas.addEventListener('touchmove', onTouchMove, { passive: false });
-  window.addEventListener('touchend', onTouchEnd);
+  document.addEventListener('pointerlockchange', onLockChange);
 
   function pollGamepad() {
-    if (!navigator.getGamepads) return { ax: 0, ay: 0, mx: 0, my: 0, connected: false };
+    if (!navigator.getGamepads) return { mx: 0, mz: 0, lx: 0, ly: 0, connected: false };
     const pads = navigator.getGamepads();
     let mx = 0;
-    let my = 0;
-    let ax = 0;
-    let ay = 0;
+    let mz = 0;
+    let lx = 0;
+    let ly = 0;
     let connected = false;
     for (let i = 0; i < pads.length; i++) {
       const pad = pads[i];
       if (!pad || !pad.connected) continue;
       connected = true;
-      // Buttons. Only apply rising edges when the pad state actually changed.
       for (const [idx, action] of Object.entries(PADMAP)) {
         const b = pad.buttons[idx];
         if (!b) continue;
         const isDown = b.pressed || b.value > 0.4;
-        const key = `pad${i}_${idx}`;
-        if (isDown && !consumed[key]) pressed[action] = true;
+        const key = `p${i}b${idx}`;
+        if (isDown && !padHeld[key]) pressed[action] = true;
         if (isDown) down[action] = true;
-        else if (consumed[key]) down[action] = false;
-        consumed[key] = isDown;
+        else if (padHeld[key]) down[action] = false;
+        padHeld[key] = isDown;
       }
-      const lx = pad.axes[0] || 0;
-      const ly = pad.axes[1] || 0;
+      const ax = pad.axes[0] || 0;
+      const az = pad.axes[1] || 0;
+      if (Math.hypot(ax, az) > DEADZONE) {
+        mx += ax;
+        mz += az;
+      }
       const rx = pad.axes[2] || 0;
       const ry = pad.axes[3] || 0;
-      if (Math.hypot(lx, ly) > DEADZONE) {
-        mx += lx;
-        my += ly;
-      }
       if (Math.hypot(rx, ry) > DEADZONE) {
-        ax += rx;
-        ay += ry;
+        lx += rx;
+        ly += ry;
       }
-      lastPadTimestamps[i] = pad.timestamp;
     }
-    return { ax, ay, mx, my, connected };
+    return { mx, mz, lx, ly, connected };
   }
 
   return {
     name: 'browser-input',
 
-    setPointerMapper(fn) {
-      mapPointer = fn || ((p) => p);
-    },
-
     sample() {
       const pad = pollGamepad();
 
       let mx = (down.right ? 1 : 0) - (down.left ? 1 : 0);
-      let my = (down.down ? 1 : 0) - (down.up ? 1 : 0);
+      let mz = (down.back ? 1 : 0) - (down.forward ? 1 : 0);
       mx += pad.mx;
-      my += pad.my;
-      const move = Math.hypot(mx, my) > 1 ? norm(mx, my) : { x: mx, y: my };
-      snapshot.move.x = move.x;
-      snapshot.move.y = move.y;
-
-      // Aim priority: right stick > arrow keys > mouse.
-      let sx = 0;
-      let sy = 0;
-      let shooting = false;
-      if (Math.hypot(pad.ax, pad.ay) > DEADZONE) {
-        const d = norm(pad.ax, pad.ay);
-        sx = d.x;
-        sy = d.y;
-        shooting = true;
-      } else {
-        const kx = (down.aimRight ? 1 : 0) - (down.aimLeft ? 1 : 0);
-        const ky = (down.aimDown ? 1 : 0) - (down.aimUp ? 1 : 0);
-        if (kx || ky) {
-          const d = norm(kx, ky);
-          sx = d.x;
-          sy = d.y;
-          shooting = true;
-        }
+      mz += pad.mz;
+      const len = Math.hypot(mx, mz);
+      if (len > 1) {
+        mx /= len;
+        mz /= len;
       }
-      if (down.fire || mouseDown) shooting = true;
+      snapshot.move.x = mx;
+      snapshot.move.z = mz;
 
-      snapshot.shoot.x = sx;
-      snapshot.shoot.y = sy;
-      snapshot.shooting = shooting;
+      // Right stick contributes to look as a per-tick delta, like the mouse.
+      snapshot.look.dx = lookX + pad.lx * padSensitivity;
+      snapshot.look.dy = lookY + pad.ly * padSensitivity;
+      lookX = 0;
+      lookY = 0;
 
-      if (pointerActive && pointerScreen) {
-        pointerWorld = mapPointer(pointerScreen);
-        snapshot.pointer = pointerWorld;
-      } else {
-        snapshot.pointer = null;
-      }
-      // A digital aim overrides the mouse for this tick.
-      snapshot.pointerAiming = !(sx || sy);
+      snapshot.pointerLocked = locked;
+      snapshot.gamepad = pad.connected;
 
       let any = false;
       for (const a of ACTIONS) {
@@ -271,7 +218,6 @@ export function createBrowserInput(canvas, opts = {}) {
         }
       }
       snapshot.anyPressed = any;
-      snapshot.gamepad = pad.connected;
       return snapshot;
     },
 
@@ -279,17 +225,51 @@ export function createBrowserInput(canvas, opts = {}) {
       for (const a of ACTIONS) pressed[a] = false;
     },
 
+    requestLock() {
+      if (locked) return;
+      const p = canvas.requestPointerLock({ unadjustedMovement: true });
+      // Chrome returns a promise; older engines return undefined.
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          try {
+            canvas.requestPointerLock();
+          } catch {
+            /* host refused; the game stays playable with keyboard turning */
+          }
+        });
+      }
+    },
+
+    releaseLock() {
+      if (document.exitPointerLock) document.exitPointerLock();
+    },
+
+    isLocked() {
+      return locked;
+    },
+
+    setSensitivity(v) {
+      sensitivity = Math.max(0.0004, Math.min(0.01, v));
+    },
+
+    getSensitivity() {
+      return sensitivity;
+    },
+
+    setInvertY(v) {
+      invertY = !!v;
+    },
+
     dispose() {
-      target.removeEventListener('keydown', onKeyDown);
-      target.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
-      canvas.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mousemove', onMouseMove);
       canvas.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mouseup', onMouseUp);
+      canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContextMenu);
-      canvas.removeEventListener('touchstart', onTouchStart);
-      canvas.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onTouchEnd);
+      document.removeEventListener('pointerlockchange', onLockChange);
     },
   };
 }

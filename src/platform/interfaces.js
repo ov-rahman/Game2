@@ -1,98 +1,79 @@
 /**
  * Platform adapter contracts.
  *
- * The simulation core (everything under src/core and src/data) must never touch
- * `window`, `document`, `localStorage`, `Audio`, `fetch` or any other host API.
- * It only ever sees the plain objects described below. To run the game on a new
- * host (Tauri, Electron, a test harness) implement this shape and hand it to
- * `createGameShell()` — nothing in the core changes.
+ * The simulation core (src/core, src/data) must never touch `window`,
+ * `document`, `localStorage`, WebGL, Web Audio or any other host API. It only
+ * sees the plain objects described here. To run the game on another host
+ * (Tauri, Electron, a test harness) implement this shape and hand it to the
+ * shell — nothing above the adapter layer changes.
  *
- * This file is documentation-as-code: the JSDoc typedefs are the contract, and
- * `assertPlatform` gives a loud, early failure if an adapter is incomplete.
+ * The JSDoc below is the contract; `assertPlatform` fails loudly and early when
+ * an adapter is incomplete, rather than letting the game die inside a hot loop.
  */
 
 /**
  * @typedef {Object} InputSnapshot
- * Immutable-per-tick view of the controls. Produced by the input adapter,
- * consumed by the core.
- * @property {{x:number,y:number}} move       Normalized movement vector.
- * @property {{x:number,y:number}} shoot      Normalized firing direction (zero = not firing).
- * @property {boolean} shooting               True while a fire control is held.
- * @property {{x:number,y:number}|null} pointer Aim position in *world* units, or null when aiming is digital.
- * @property {Object<string,boolean>} down    Held state per action name.
- * @property {Object<string,boolean>} pressed Rising edge per action name, valid for exactly one tick.
+ * @property {{x:number,z:number}} move   Normalised movement intent, camera-relative.
+ * @property {{dx:number,dy:number}} look Mouse/stick look delta for this tick, in radians.
+ * @property {Object<string,boolean>} down    Held state per action.
+ * @property {Object<string,boolean>} pressed Rising edge per action, valid for one tick.
+ * @property {boolean} pointerLocked
+ * @property {boolean} gamepad
  */
 
 /**
  * @typedef {Object} InputAdapter
- * @property {() => InputSnapshot} sample     Build the snapshot for the tick about to run.
- * @property {() => void} endTick             Clear per-tick edges after the core consumed them.
- * @property {(fn:(pos:{x:number,y:number})=>void) => void} setPointerMapper
- *           Installs the screen->world transform used for mouse aim.
+ * @property {() => InputSnapshot} sample
+ * @property {() => void} endTick        Clear per-tick edges once consumed.
+ * @property {() => void} requestLock    Ask the host to capture the pointer.
+ * @property {() => void} releaseLock
+ * @property {(v:number) => void} setSensitivity
  * @property {() => void} dispose
  */
 
 /**
  * @typedef {Object} AudioAdapter
- * @property {(name:string, opts?:Object) => void} play    Fire a one-shot sound by id.
- * @property {(name:string|null) => void} setMusic         Cross-fade to a music track id (null = silence).
+ * @property {(name:string, opts?:Object) => void} play  One-shot by id; opts may carry 3D position.
+ * @property {(name:string|null) => void} setMusic
  * @property {(v:number) => void} setMasterVolume
- * @property {(v:number) => void} setSfxVolume
- * @property {(v:number) => void} setMusicVolume
- * @property {() => void} resume                           Unlock playback after a user gesture.
+ * @property {(pos:{x:number,y:number,z:number}, yaw:number) => void} setListener
+ * @property {() => void} resume
  * @property {() => void} dispose
  */
 
 /**
  * @typedef {Object} StorageAdapter
- * @property {(key:string) => any} load        Returns parsed data or null.
- * @property {(key:string, value:any) => void} save
+ * @property {(key:string) => any} load
+ * @property {(key:string, value:any) => boolean} save
  * @property {(key:string) => void} remove
  */
 
 /**
  * @typedef {Object} DisplayAdapter
- * @property {() => {ctx:CanvasRenderingContext2D, width:number, height:number, scale:number}} target
- * @property {(w:number,h:number) => {canvas:any, ctx:CanvasRenderingContext2D}} createSurface
- *           Offscreen drawing surface used to bake sprite atlases.
+ * @property {WebGL2RenderingContext} gl
+ * @property {() => {width:number,height:number}} size
+ * @property {(w:number,h:number,opts?:Object) => {canvas:any, ctx:CanvasRenderingContext2D, width:number, height:number}} createSurface
  * @property {() => boolean} isFullscreen
  * @property {() => void} toggleFullscreen
- * @property {(fn:(w:number,h:number,scale:number)=>void) => void} onResize
+ * @property {(fn:(w:number,h:number)=>void) => void} onResize
  * @property {() => void} dispose
  */
 
 /**
  * @typedef {Object} TimerAdapter
- * @property {(fn:(nowMs:number)=>void) => void} start   Begin the animation loop.
+ * @property {(fn:(nowMs:number)=>void) => void} start
  * @property {() => void} stop
- * @property {() => number} now                          Monotonic milliseconds.
- */
-
-/**
- * @typedef {Object} Platform
- * @property {string} name
- * @property {InputAdapter} input
- * @property {AudioAdapter} audio
- * @property {StorageAdapter} storage
- * @property {DisplayAdapter} display
- * @property {TimerAdapter} timer
- * @property {{ canFullscreen:boolean, canQuit:boolean, hasPointer:boolean }} caps
- * @property {() => void} [quit]
+ * @property {() => number} now
  */
 
 const REQUIRED = {
-  input: ['sample', 'endTick', 'setPointerMapper'],
+  input: ['sample', 'endTick', 'requestLock'],
   audio: ['play', 'setMusic', 'setMasterVolume', 'resume'],
   storage: ['load', 'save', 'remove'],
-  display: ['target', 'createSurface', 'onResize'],
+  display: ['size', 'createSurface', 'onResize'],
   timer: ['start', 'stop', 'now'],
 };
 
-/**
- * Validate an adapter bundle. Throws with a precise message rather than letting
- * the game die later inside a hot loop.
- * @param {Platform} p
- */
 export function assertPlatform(p) {
   if (!p || typeof p !== 'object') throw new Error('Platform: expected an object');
   for (const [group, methods] of Object.entries(REQUIRED)) {
@@ -104,26 +85,26 @@ export function assertPlatform(p) {
       }
     }
   }
+  if (!p.display.gl) throw new Error('Platform: display.gl (WebGL2 context) is missing');
   return p;
 }
 
 /** Action names the core understands. Adapters map their own keys onto these. */
 export const ACTIONS = [
-  'up',
-  'down',
+  'forward',
+  'back',
   'left',
   'right',
-  'aimUp',
-  'aimDown',
-  'aimLeft',
-  'aimRight',
+  'sprint',
+  'crouch',
   'fire',
-  'bomb',
-  'use',
+  'altFire',
   'interact',
-  'dash',
-  'pause',
+  'use',
+  'reloadTorch',
+  'torch',
   'map',
+  'pause',
   'confirm',
   'cancel',
   'fullscreen',

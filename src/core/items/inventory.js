@@ -2,7 +2,7 @@
  * Item ownership, stat aggregation and hook dispatch.
  *
  * Stats are recomputed from scratch whenever anything changes rather than being
- * patched incrementally — with a few dozen items that costs nothing and removes
+ * patched incrementally. With a few dozen items that costs nothing and removes
  * a whole family of "stat drifted after a pickup" bugs.
  */
 import { ITEMS, ACTIVES, BASE_STATS } from '../../data/items.js';
@@ -17,12 +17,9 @@ const HOOK_NAMES = [
   'onCrit',
   'onHurt',
   'onContact',
-  'onDash',
   'onRoomEnter',
-  'onRoomClear',
   'onFloorStart',
   'onUpdate',
-  'onBomb',
 ];
 
 export function createInventory() {
@@ -30,6 +27,7 @@ export function createInventory() {
     items: [],
     counts: Object.create(null),
     activeId: null,
+    activeName: '',
     activeCharge: 0,
     activeMax: 0,
     hooks: Object.create(null),
@@ -41,7 +39,6 @@ export function hasItem(inv, id) {
   return (inv.counts[id] || 0) > 0;
 }
 
-/** Rebuild the hook index and the active synergy list. */
 function reindex(inv) {
   for (const name of HOOK_NAMES) inv.hooks[name] = [];
   for (const id of inv.items) {
@@ -51,16 +48,10 @@ function reindex(inv) {
       if (typeof it.hooks[name] === 'function') inv.hooks[name].push(it.hooks[name]);
     }
   }
-  const act = inv.activeId ? ACTIVES[inv.activeId] : null;
-  if (act && typeof act.onStats === 'function') inv.hooks.onStats.push(act.onStats);
-
   inv.synergies = SYNERGIES.filter((syn) => syn.requires.every((r) => hasItem(inv, r)));
 }
 
-/**
- * Add an item. Returns the list of synergies that became active, so the shell
- * can announce them.
- */
+/** Add an item; returns synergies that became active so the shell can announce them. */
 export function addItem(game, player, id) {
   const it = ITEMS[id];
   if (!it) return [];
@@ -73,9 +64,7 @@ export function addItem(game, player, id) {
   player.statsDirty = true;
   recomputeStats(game, player);
 
-  if (it.hooks && it.hooks.onPickup) {
-    it.hooks.onPickup({ game, player, item: it, id });
-  }
+  if (it.hooks && it.hooks.onPickup) it.hooks.onPickup({ game, player, item: it, id });
   player.hp = Math.min(player.hp, player.stats.maxHp);
   if (player.hp <= 0) player.hp = 1;
 
@@ -85,52 +74,46 @@ export function addItem(game, player, id) {
 export function setActive(player, id) {
   const act = ACTIVES[id];
   if (!act) return null;
-  const previous = player.inv.activeId;
   player.inv.activeId = id;
+  player.inv.activeName = act.name;
   player.inv.activeMax = act.charge;
   player.inv.activeCharge = 0;
   reindex(player.inv);
   player.statsDirty = true;
-  return previous;
+  return id;
 }
 
-/** Aggregate BASE_STATS + item stats + mults + onStats hooks. */
 export function recomputeStats(game, player) {
   const s = Object.assign({}, BASE_STATS);
-  s.rangeMult = 1;
   const flags = Object.create(null);
 
   for (const id of player.inv.items) {
     const it = ITEMS[id];
     if (!it) continue;
-    if (it.stats) {
-      for (const k in it.stats) s[k] = (s[k] || 0) + it.stats[k];
-    }
-    if (it.flags) {
-      for (const k in it.flags) flags[k] = (flags[k] || 0) + it.flags[k];
-    }
+    if (it.stats) for (const k in it.stats) s[k] = (s[k] || 0) + it.stats[k];
+    if (it.flags) for (const k in it.flags) flags[k] = (flags[k] || 0) + it.flags[k];
   }
   for (const id of player.inv.items) {
     const it = ITEMS[id];
-    if (it && it.mult) {
-      for (const k in it.mult) s[k] = (s[k] == null ? 1 : s[k]) * it.mult[k];
-    }
+    if (it && it.mult) for (const k in it.mult) s[k] = (s[k] == null ? 1 : s[k]) * it.mult[k];
   }
 
   const ctx = { game, player, stats: s, flags };
   for (const fn of player.inv.hooks.onStats || []) fn(ctx);
 
-  // Clamp to sane ranges so no combination can break the game.
+  // Clamp so no combination can break the game.
   s.maxHp = Math.max(2, Math.round(s.maxHp));
-  s.fireRate = Math.max(0.55, s.fireRate);
-  s.moveSpeed = Math.max(58, Math.min(340, s.moveSpeed));
-  s.shotSpeed = Math.max(110, Math.min(760, s.shotSpeed));
+  s.fireRate = Math.max(0.7, s.fireRate);
+  s.moveSpeed = Math.max(0.5, Math.min(2.2, s.moveSpeed));
+  s.shotSpeed = Math.max(12, Math.min(160, s.shotSpeed));
   s.damage = Math.max(0.5, s.damage);
   s.damageMult = Math.max(0.15, s.damageMult);
-  s.range = Math.max(0.2, s.range * s.rangeMult);
+  s.range = Math.max(0.25, s.range);
   s.critChance = Math.max(0, Math.min(0.95, s.critChance));
-  s.dashCooldown = Math.max(0.25, s.dashCooldown);
-  s.shotSize = Math.max(2, Math.min(14, s.shotSize));
+  s.heatPerShot = Math.max(0.004, s.heatPerShot);
+  s.heatCooling = Math.max(0.2, s.heatCooling);
+  s.torchDrain = Math.max(0.002, s.torchDrain);
+  s.spread = Math.max(0, s.spread);
 
   player.stats = s;
   player.flags = flags;
@@ -139,7 +122,6 @@ export function recomputeStats(game, player) {
   return s;
 }
 
-/** Fire one hook across every owned item. */
 export function runHook(player, name, ctx) {
   const list = player.inv.hooks[name];
   if (!list || !list.length) return;

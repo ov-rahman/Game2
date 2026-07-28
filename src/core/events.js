@@ -1,15 +1,13 @@
 /**
- * Minimal synchronous event bus.
+ * Synchronous event bus.
  *
- * The simulation core never talks to the browser. Instead it emits events
- * ("sfx", "shake", "particles", "floorChanged", ...) that the shell wires up to
- * the platform adapters. Swapping the shell swaps every side effect.
+ * The simulation never calls the browser. It emits events ("sfx", "fx",
+ * "shake", "floorStart", …) and the shell wires them to platform adapters, so
+ * swapping the shell swaps every side effect.
  */
 export class EventBus {
   constructor() {
-    /** @type {Map<string, Function[]>} */
     this.handlers = new Map();
-    this.muted = false;
   }
 
   on(type, fn) {
@@ -30,7 +28,6 @@ export class EventBus {
   }
 
   emit(type, payload) {
-    if (this.muted) return;
     const list = this.handlers.get(type);
     if (!list) return;
     for (let i = 0; i < list.length; i++) list[i](payload);

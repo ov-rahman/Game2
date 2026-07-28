@@ -1,15 +1,14 @@
 /**
- * Browser audio adapter — a small synthesiser over the Web Audio API.
+ * Browser audio: a small synthesiser plus a 3D panner, over Web Audio.
  *
- * Reads the declarative sound/music descriptions in src/data/sounds.js and
- * renders them with oscillators, noise buffers and biquads. Nothing is loaded
- * from disk or network. A desktop build can reuse this file unchanged (Electron
- * and Tauri's webview both ship Web Audio) or swap in a native mixer that
- * implements the same five methods.
+ * Reads the declarative descriptions in src/data/sounds.js and renders them
+ * with oscillators, noise buffers and biquads. Nothing is loaded from disk or
+ * network. Positional sounds are placed with a PannerNode so monsters can be
+ * heard before they are seen — which, in a game this dark, is most of the time.
  */
-import { SOUNDS, MUSIC } from '../../data/sounds.js';
+import { SOUNDS, MUSIC, AMBIENCE } from '../../data/sounds.js';
 
-const MAX_VOICES = 24; // hard cap so a bullet-hell frame cannot stall audio
+const MAX_VOICES = 28;
 
 export function createBrowserAudio(opts = {}) {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -19,23 +18,29 @@ export function createBrowserAudio(opts = {}) {
   let master = null;
   let sfxBus = null;
   let musicBus = null;
+  let ambienceBus = null;
   let comp = null;
   let noiseBuffer = null;
 
-  let masterVol = opts.master != null ? opts.master : 0.8;
-  let sfxVol = opts.sfx != null ? opts.sfx : 0.9;
-  let musicVol = opts.music != null ? opts.music : 0.5;
+  let masterVol = opts.master != null ? opts.master : 0.85;
+  let sfxVol = opts.sfx != null ? opts.sfx : 1.0;
+  let musicVol = opts.music != null ? opts.music : 0.45;
 
   let voices = 0;
   let started = false;
 
-  // ---- music scheduler state -------------------------------------------
   let currentTrack = null;
   let trackName = null;
   let nextNoteTime = 0;
   let step = 0;
   let schedulerId = 0;
   let musicSeed = 1;
+
+  let ambience = null;
+  let ambienceNodes = null;
+  let creakTimer = 0;
+
+  const listener = { x: 0, y: 0, z: 0, yaw: 0 };
 
   function rnd() {
     musicSeed = (musicSeed * 1664525 + 1013904223) >>> 0;
@@ -47,9 +52,9 @@ export function createBrowserAudio(opts = {}) {
     ctx = new AudioCtx({ latencyHint: 'interactive' });
 
     comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -12;
-    comp.knee.value = 18;
-    comp.ratio.value = 8;
+    comp.threshold.value = -14;
+    comp.knee.value = 20;
+    comp.ratio.value = 9;
     comp.attack.value = 0.003;
     comp.release.value = 0.25;
 
@@ -59,21 +64,30 @@ export function createBrowserAudio(opts = {}) {
     sfxBus = ctx.createGain();
     sfxBus.gain.value = sfxVol;
     musicBus = ctx.createGain();
-    musicBus.gain.value = 0; // faded in by setMusic
+    musicBus.gain.value = 0;
+    ambienceBus = ctx.createGain();
+    ambienceBus.gain.value = 0;
 
     sfxBus.connect(comp);
     musicBus.connect(comp);
+    ambienceBus.connect(comp);
     comp.connect(master);
     master.connect(ctx.destination);
 
-    // One second of white noise, reused by every noise layer.
+    // One second of deterministic white noise, reused by every noise layer.
     const len = Math.floor(ctx.sampleRate);
     noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const data = noiseBuffer.getChannelData(0);
-    let s = 12345;
+    let s = 987654321;
     for (let i = 0; i < len; i++) {
       s = (s * 1103515245 + 12345) & 0x7fffffff;
-      data[i] = (s / 0x3fffffff) - 1;
+      data[i] = s / 0x3fffffff - 1;
+    }
+
+    if (ctx.listener && ctx.listener.forwardX) {
+      ctx.listener.upX.value = 0;
+      ctx.listener.upY.value = 1;
+      ctx.listener.upZ.value = 0;
     }
     return ctx;
   }
@@ -85,8 +99,8 @@ export function createBrowserAudio(opts = {}) {
     param.exponentialRampToValueAtTime(0.0001, t0 + Math.max(attack + 0.01, dur));
   }
 
-  function playLayer(layer, t0, gainMul, busNode, rateMul) {
-    const dur = (layer.dur || 0.15);
+  function playLayer(layer, t0, gainMul, dest, rateMul) {
+    const dur = layer.dur || 0.15;
     const start = t0 + (layer.delay || 0);
     let src;
     let freqParam = null;
@@ -104,16 +118,11 @@ export function createBrowserAudio(opts = {}) {
       const f1 = (layer.f1 != null ? layer.f1 : layer.f0 || 440) * rateMul;
       freqParam.setValueAtTime(f0, start);
       if (f1 !== f0) {
-        if ((layer.curve || 'exp') === 'exp') {
-          freqParam.exponentialRampToValueAtTime(Math.max(1, f1), start + dur);
-        } else {
-          freqParam.linearRampToValueAtTime(Math.max(1, f1), start + dur);
-        }
+        if ((layer.curve || 'exp') === 'exp') freqParam.exponentialRampToValueAtTime(Math.max(1, f1), start + dur);
+        else freqParam.linearRampToValueAtTime(Math.max(1, f1), start + dur);
       }
-      if (layer.detune) src.detune.value = layer.detune;
     }
 
-    // Optional FM operator for metallic / growling timbres.
     let modOsc = null;
     if (layer.fm && freqParam) {
       modOsc = ctx.createOscillator();
@@ -144,15 +153,7 @@ export function createBrowserAudio(opts = {}) {
     const g = ctx.createGain();
     envelope(g.gain, start, dur, layer.a, layer.d, Math.max(0.0002, (layer.gain == null ? 1 : layer.gain) * gainMul));
     node.connect(g);
-
-    if (layer.pan != null && ctx.createStereoPanner) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = Math.max(-1, Math.min(1, layer.pan));
-      g.connect(p);
-      p.connect(busNode);
-    } else {
-      g.connect(busNode);
-    }
+    g.connect(dest);
 
     src.start(start);
     src.stop(start + dur + 0.05);
@@ -168,6 +169,27 @@ export function createBrowserAudio(opts = {}) {
     };
   }
 
+  /** Positional sounds route through a panner; UI sounds go straight to the bus. */
+  function destinationFor(opt) {
+    if (!opt || opt.x == null) return sfxBus;
+    if (!ctx.createPanner) return sfxBus;
+    const p = ctx.createPanner();
+    p.panningModel = 'equalpower';
+    p.distanceModel = 'inverse';
+    p.refDistance = 4;
+    p.maxDistance = 60;
+    p.rolloffFactor = 1.1;
+    if (p.positionX) {
+      p.positionX.value = opt.x;
+      p.positionY.value = opt.y || 0;
+      p.positionZ.value = opt.z;
+    } else {
+      p.setPosition(opt.x, opt.y || 0, opt.z);
+    }
+    p.connect(sfxBus);
+    return p;
+  }
+
   function play(name, options) {
     if (!started) return;
     const def = SOUNDS[name];
@@ -176,35 +198,39 @@ export function createBrowserAudio(opts = {}) {
     ensureContext();
     if (ctx.state === 'suspended') return;
 
-    const t0 = ctx.currentTime + 0.001;
     const opt = options || {};
-    let rateMul = opt.rate || 1;
-    if (def.vary && def.vary.rate) {
-      rateMul *= 1 + (Math.random() * 2 - 1) * def.vary.rate;
+
+    // Cull distant sounds entirely rather than paying for inaudible voices.
+    if (opt.x != null) {
+      const d = Math.hypot(opt.x - listener.x, (opt.y || 0) - listener.y, opt.z - listener.z);
+      if (d > 55) return;
     }
+
+    const dest = destinationFor(opt);
+    const t0 = ctx.currentTime + 0.001;
+    let rateMul = opt.rate || 1;
+    if (def.vary && def.vary.rate) rateMul *= 1 + (Math.random() * 2 - 1) * def.vary.rate;
     const gainMul = (def.gain == null ? 0.3 : def.gain) * (opt.gain == null ? 1 : opt.gain);
 
     for (const layer of def.layers) {
-      const rep = layer.rep;
-      if (rep) {
-        for (let i = 0; i < rep.times; i++) {
+      if (layer.rep) {
+        for (let i = 0; i < layer.rep.times; i++) {
           const l = Object.assign({}, layer, {
-            delay: (layer.delay || 0) + i * rep.every,
-            f0: layer.f0 ? layer.f0 * (1 + i * (rep.detune || 0)) : layer.f0,
+            delay: (layer.delay || 0) + i * layer.rep.every,
+            f0: layer.f0 ? layer.f0 * (1 + i * (layer.rep.detune || 0)) : layer.f0,
           });
           delete l.rep;
-          playLayer(l, t0, gainMul, sfxBus, rateMul);
+          playLayer(l, t0, gainMul, dest, rateMul);
         }
       } else {
-        playLayer(layer, t0, gainMul, sfxBus, rateMul);
+        playLayer(layer, t0, gainMul, dest, rateMul);
       }
     }
   }
 
-  // ---- music -------------------------------------------------------------
-  function midiToFreq(m) {
-    return 440 * Math.pow(2, (m - 69) / 12);
-  }
+  // ---- music ------------------------------------------------------------
+
+  const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
   function degreeToMidi(track, degree, octave = 0) {
     const scale = track.scale;
@@ -232,13 +258,12 @@ export function createBrowserAudio(opts = {}) {
       const f = ctx.createBiquadFilter();
       f.type = 'lowpass';
       f.frequency.value = filterHz;
-      f.Q.value = 1;
       osc.connect(f);
       node = f;
     }
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.015);
+    g.gain.linearRampToValueAtTime(gain, t + 0.02);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     node.connect(g);
     g.connect(musicBus);
@@ -258,15 +283,15 @@ export function createBrowserAudio(opts = {}) {
     if (kind === 'kick') {
       const o = ctx.createOscillator();
       o.type = 'sine';
-      o.frequency.setValueAtTime(150, t);
-      o.frequency.exponentialRampToValueAtTime(42, t + 0.13);
+      o.frequency.setValueAtTime(140, t);
+      o.frequency.exponentialRampToValueAtTime(40, t + 0.14);
       const g = ctx.createGain();
       g.gain.setValueAtTime(gain, t);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
       o.connect(g);
       g.connect(musicBus);
       o.start(t);
-      o.stop(t + 0.2);
+      o.stop(t + 0.22);
       o.onended = () => g.disconnect();
     } else {
       const s = ctx.createBufferSource();
@@ -274,11 +299,10 @@ export function createBrowserAudio(opts = {}) {
       s.loop = true;
       const f = ctx.createBiquadFilter();
       f.type = kind === 'hat' ? 'highpass' : 'bandpass';
-      f.frequency.value = kind === 'hat' ? 7000 : 1600;
-      f.Q.value = kind === 'hat' ? 0.7 : 1.2;
+      f.frequency.value = kind === 'hat' ? 7500 : 1700;
       const g = ctx.createGain();
-      const dur = kind === 'hat' ? 0.045 : 0.16;
-      g.gain.setValueAtTime(gain * (kind === 'hat' ? 0.4 : 0.7), t);
+      const dur = kind === 'hat' ? 0.04 : 0.16;
+      g.gain.setValueAtTime(gain * (kind === 'hat' ? 0.35 : 0.65), t);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       s.connect(f);
       f.connect(g);
@@ -300,37 +324,21 @@ export function createBrowserAudio(opts = {}) {
     const bar = Math.floor(i / 8) % track.chords.length;
     const chord = track.chords[bar];
     const s = i % 8;
-    const beat = (60 / track.bpm) / 2; // eighth notes
+    const beat = 60 / track.bpm / 2;
 
-    // Bass
     const bp = track.bass.pattern[s];
     if (bp != null) {
-      musicVoice(
-        midiToFreq(degreeToMidi(track, chord[0] + bp, 0)),
-        t,
-        beat * 1.4,
-        track.bass.wave,
-        track.bass.gain,
-        track.bass.filter || 0,
-      );
+      musicVoice(midiToFreq(degreeToMidi(track, chord[0] + bp, 0)), t, beat * 1.5, track.bass.wave, track.bass.gain, track.bass.filter || 0);
     }
-
-    // Pad — one sustained chord per bar.
     if (s === 0) {
       for (let k = 0; k < chord.length; k++) {
-        const m = degreeToMidi(track, chord[k], 1);
-        musicVoice(midiToFreq(m), t, beat * 7.5, track.pad.wave, track.pad.gain, 1800, (k - 1) * track.pad.detune);
+        musicVoice(midiToFreq(degreeToMidi(track, chord[k], 1)), t, beat * 7.5, track.pad.wave, track.pad.gain, 1600, (k - 1) * track.pad.detune);
       }
     }
-
-    // Lead — sparse improvisation over the chord.
     if (rnd() < track.lead.density) {
-      const pick = chord[Math.floor(rnd() * chord.length)] + (rnd() < 0.3 ? 1 : 0);
-      const m = degreeToMidi(track, pick, track.lead.octave - 1);
-      musicVoice(midiToFreq(m), t, beat * (rnd() < 0.25 ? 1.8 : 0.8), track.lead.wave, track.lead.gain, 3200);
+      const pick = chord[Math.floor(rnd() * chord.length)];
+      musicVoice(midiToFreq(degreeToMidi(track, pick, track.lead.octave - 1)), t, beat * (rnd() < 0.3 ? 1.8 : 0.8), track.lead.wave, track.lead.gain, 2800);
     }
-
-    // Drums
     const d = track.drums;
     if (d.kick[s]) drumHit('kick', t, d.gain);
     if (d.snare[s]) drumHit('snare', t, d.gain);
@@ -338,14 +346,32 @@ export function createBrowserAudio(opts = {}) {
   }
 
   function scheduler() {
-    if (!currentTrack || !ctx) return;
-    const beat = (60 / currentTrack.bpm) / 2;
-    const horizon = ctx.currentTime + 0.35;
-    let guard = 0;
-    while (nextNoteTime < horizon && guard++ < 32) {
-      scheduleStep(currentTrack, nextNoteTime, step);
-      step++;
-      nextNoteTime += beat;
+    if (!ctx) return;
+    if (currentTrack) {
+      const beat = 60 / currentTrack.bpm / 2;
+      const horizon = ctx.currentTime + 0.4;
+      let guard = 0;
+      while (nextNoteTime < horizon && guard++ < 32) {
+        scheduleStep(currentTrack, nextNoteTime, step);
+        step++;
+        nextNoteTime += beat;
+      }
+    }
+    // Ambient one-shots: creaks, distant growls, dripping.
+    if (ambience) {
+      creakTimer -= 0.12;
+      if (creakTimer <= 0) {
+        creakTimer = ambience.creakEvery[0] + Math.random() * (ambience.creakEvery[1] - ambience.creakEvery[0]);
+        const a = Math.random() * Math.PI * 2;
+        const d = 12 + Math.random() * 24;
+        play(ambience.creak, {
+          gain: 0.35,
+          rate: 0.6 + Math.random() * 0.5,
+          x: listener.x + Math.cos(a) * d,
+          y: listener.y,
+          z: listener.z + Math.sin(a) * d,
+        });
+      }
     }
   }
 
@@ -359,10 +385,74 @@ export function createBrowserAudio(opts = {}) {
     schedulerId = 0;
   }
 
+  function stopAmbience() {
+    if (!ambienceNodes) return;
+    try {
+      ambienceNodes.osc.stop();
+      ambienceNodes.osc.disconnect();
+      ambienceNodes.filter.disconnect();
+    } catch {
+      /* ignore */
+    }
+    ambienceNodes = null;
+  }
+
   return {
     name: 'browser-audio',
 
     play,
+
+    setListener(pos, yaw) {
+      listener.x = pos.x;
+      listener.y = pos.y;
+      listener.z = pos.z;
+      listener.yaw = yaw;
+      if (!ctx || !ctx.listener) return;
+      const fx = Math.sin(yaw);
+      const fz = Math.cos(yaw);
+      if (ctx.listener.positionX) {
+        ctx.listener.positionX.value = pos.x;
+        ctx.listener.positionY.value = pos.y;
+        ctx.listener.positionZ.value = pos.z;
+        ctx.listener.forwardX.value = fx;
+        ctx.listener.forwardY.value = 0;
+        ctx.listener.forwardZ.value = fz;
+      } else if (ctx.listener.setPosition) {
+        ctx.listener.setPosition(pos.x, pos.y, pos.z);
+        ctx.listener.setOrientation(fx, 0, fz, 0, 1, 0);
+      }
+    },
+
+    setAmbience(id) {
+      const def = id ? AMBIENCE[id] : null;
+      if (!ctx) {
+        ambience = def;
+        return;
+      }
+      stopAmbience();
+      ambience = def;
+      if (!def) {
+        ambienceBus.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.6);
+        return;
+      }
+      const osc = ctx.createOscillator();
+      osc.type = def.droneWave;
+      osc.frequency.value = def.droneFreq;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = def.filter;
+      filter.Q.value = 2;
+      osc.connect(filter);
+      filter.connect(ambienceBus);
+      osc.start();
+      ambienceNodes = { osc, filter };
+      const t = ctx.currentTime;
+      ambienceBus.gain.cancelScheduledValues(t);
+      ambienceBus.gain.setValueAtTime(ambienceBus.gain.value, t);
+      ambienceBus.gain.linearRampToValueAtTime(def.gain, t + 1.5);
+      creakTimer = 2;
+      startScheduler();
+    },
 
     setMusic(name) {
       if (name === trackName) return;
@@ -375,13 +465,11 @@ export function createBrowserAudio(opts = {}) {
       musicBus.gain.cancelScheduledValues(now);
       musicBus.gain.setValueAtTime(musicBus.gain.value, now);
       if (!name || !MUSIC[name]) {
-        musicBus.gain.linearRampToValueAtTime(0, now + 0.5);
+        musicBus.gain.linearRampToValueAtTime(0, now + 0.8);
         currentTrack = null;
-        stopScheduler();
         return;
       }
-      // Quick duck, then swap patterns and fade back in.
-      musicBus.gain.linearRampToValueAtTime(0.0001, now + 0.25);
+      musicBus.gain.linearRampToValueAtTime(0.0001, now + 0.35);
       setTimeout(() => {
         if (trackName !== name || !ctx) return;
         currentTrack = MUSIC[name];
@@ -392,8 +480,8 @@ export function createBrowserAudio(opts = {}) {
         const t = ctx.currentTime;
         musicBus.gain.cancelScheduledValues(t);
         musicBus.gain.setValueAtTime(0.0001, t);
-        musicBus.gain.linearRampToValueAtTime(musicVol, t + 0.8);
-      }, 260);
+        musicBus.gain.linearRampToValueAtTime(musicVol, t + 1.2);
+      }, 380);
     },
 
     setMasterVolume(v) {
@@ -412,40 +500,38 @@ export function createBrowserAudio(opts = {}) {
       return { master: masterVol, sfx: sfxVol, music: musicVol };
     },
 
-    /** Must be called from a user gesture; browsers start contexts suspended. */
+    /** Must run from a user gesture; browsers start contexts suspended. */
     resume() {
       ensureContext();
       started = true;
       if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      startScheduler();
       if (currentTrack) {
         nextNoteTime = ctx.currentTime + 0.05;
-        startScheduler();
         const t = ctx.currentTime;
         musicBus.gain.cancelScheduledValues(t);
         musicBus.gain.setValueAtTime(0.0001, t);
-        musicBus.gain.linearRampToValueAtTime(musicVol, t + 0.8);
+        musicBus.gain.linearRampToValueAtTime(musicVol, t + 1.0);
       }
-    },
-
-    suspend() {
-      stopScheduler();
-      if (ctx && ctx.state === 'running') ctx.suspend().catch(() => {});
+      if (ambience && !ambienceNodes) this.setAmbience(null);
     },
 
     dispose() {
       stopScheduler();
+      stopAmbience();
       if (ctx) ctx.close().catch(() => {});
       ctx = null;
     },
   };
 }
 
-/** No-op implementation for hosts without Web Audio. */
 export function createNullAudio() {
   return {
     name: 'null-audio',
     play() {},
     setMusic() {},
+    setAmbience() {},
+    setListener() {},
     setMasterVolume() {},
     setSfxVolume() {},
     setMusicVolume() {},
@@ -453,7 +539,6 @@ export function createNullAudio() {
       return { master: 0, sfx: 0, music: 0 };
     },
     resume() {},
-    suspend() {},
     dispose() {},
   };
 }

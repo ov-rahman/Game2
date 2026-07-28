@@ -1,89 +1,211 @@
 /**
- * Visual descriptors for every creature sprite.
+ * Creature body descriptors.
  *
- * The atlas painter (src/render/atlas.js) turns each row into pixels with a
- * generic "creature" routine parameterised by `form`. This keeps ~50 monsters
- * on a handful of drawing routines while still giving each one its own
- * silhouette, palette and animation quirks — and it means new monsters are a
- * data edit, not new drawing code.
+ * The mesh builder turns each row into a low-poly body. Keeping bodies as data
+ * means a new monster is a few numbers, and it also guarantees a consistent
+ * visual language: every creature is built from the same vocabulary of parts.
  *
- * form      body construction routine
- * size      sprite box in pixels (square)
- * body/dark/light/accent  palette
- * eyes      count of eyes (0 = none)
- * frames    animation frames to bake
+ * form     construction routine (see gfx/creatures.js)
+ * height   world units, tip to floor — the main silhouette cue
+ * body     [r,g,b] main colour, dark/light are shading, glow is emissive
+ * eyes     count of glowing eyes; they are the first thing visible in fog
+ * skin     texture tile: 'flesh' | 'metal' | 'bone' | 'crystal' | 'rubble'
  */
 
 export const CREATURE_ART = {
   // ---- floor 1 ----------------------------------------------------------
-  slime: { form: 'blob', size: 28, body: '#4fd166', dark: '#2a8f3e', light: '#a8f5b0', accent: '#ffe066', eyes: 2, frames: 4 },
-  slimeSmall: { form: 'blob', size: 20, body: '#6fe07f', dark: '#37a04c', light: '#c4ffcb', accent: '#ffe066', eyes: 2, frames: 4 },
-  slimeKing: { form: 'blob', size: 44, body: '#3fbf58', dark: '#1f7534', light: '#9cf0a8', accent: '#ffd93d', eyes: 3, frames: 4, crown: true },
-  sproutling: { form: 'plant', size: 30, body: '#5fb356', dark: '#2f6f38', light: '#a8e08a', accent: '#ff8fb1', eyes: 1, frames: 3 },
-  leafling: { form: 'moth', size: 26, body: '#8ede4a', dark: '#4a8f2a', light: '#d9ff9c', accent: '#ffe066', eyes: 2, frames: 4 },
-  thornbug: { form: 'bug', size: 28, body: '#c98a3c', dark: '#7a4c18', light: '#ffd18a', accent: '#ff5b4a', eyes: 2, frames: 4, spikes: 5 },
-  thornbugElite: { form: 'bug', size: 36, body: '#e05a2a', dark: '#8a2f10', light: '#ffc08a', accent: '#ffe066', eyes: 3, frames: 4, spikes: 8 },
-  mossback: { form: 'turtle', size: 34, body: '#57813f', dark: '#2f4a22', light: '#9dc47a', accent: '#7ee081', eyes: 2, frames: 3 },
-  wisp: { form: 'wisp', size: 22, body: '#ffe066', dark: '#c79b1a', light: '#fffbe0', accent: '#ffffff', eyes: 0, frames: 4, glow: true },
-  stumpler: { form: 'stump', size: 32, body: '#8a6136', dark: '#4e3419', light: '#c39a63', accent: '#7ee081', eyes: 2, frames: 4 },
+  sporeling: {
+    form: 'blob', height: 1.1, radius: 0.5, skin: 'flesh',
+    body: [0.45, 0.62, 0.3], dark: [0.2, 0.3, 0.14], light: [0.7, 0.85, 0.45],
+    glow: [0.75, 1.0, 0.35], eyes: 2, cap: true,
+  },
+  thornhound: {
+    form: 'quadruped', height: 1.15, radius: 0.45, skin: 'flesh',
+    body: [0.5, 0.4, 0.22], dark: [0.22, 0.17, 0.09], light: [0.75, 0.62, 0.35],
+    glow: [1.0, 0.7, 0.2], eyes: 2, spikes: 6,
+  },
+  lantern: {
+    form: 'orb', height: 1.6, radius: 0.34, skin: 'crystal',
+    body: [0.9, 0.85, 0.45], dark: [0.4, 0.35, 0.15], light: [1.0, 0.97, 0.7],
+    glow: [1.0, 0.92, 0.5], eyes: 1, float: true,
+  },
+  creeper: {
+    form: 'spider', height: 0.85, radius: 0.5, skin: 'flesh',
+    body: [0.32, 0.42, 0.28], dark: [0.14, 0.19, 0.12], light: [0.5, 0.65, 0.4],
+    glow: [0.6, 1.0, 0.4], eyes: 4, legs: 6,
+  },
+  shrieker: {
+    form: 'plant', height: 1.9, radius: 0.45, skin: 'flesh',
+    body: [0.55, 0.3, 0.5], dark: [0.24, 0.12, 0.22], light: [0.8, 0.55, 0.75],
+    glow: [1.0, 0.4, 0.8], eyes: 1,
+  },
+  thornAlpha: {
+    form: 'quadruped', height: 1.7, radius: 0.65, skin: 'bone',
+    body: [0.62, 0.34, 0.18], dark: [0.28, 0.14, 0.07], light: [0.9, 0.6, 0.3],
+    glow: [1.0, 0.55, 0.15], eyes: 3, spikes: 10,
+  },
 
   // ---- floor 2 ----------------------------------------------------------
-  bat: { form: 'bat', size: 24, body: '#5f6fbf', dark: '#2a3160', light: '#a8b6ff', accent: '#3ff0d0', eyes: 2, frames: 4 },
-  batSwarmLord: { form: 'bat', size: 38, body: '#8f7bff', dark: '#3a2a70', light: '#d0c8ff', accent: '#3ff0d0', eyes: 3, frames: 4, crown: true },
-  crawler: { form: 'bug', size: 28, body: '#2f7f8f', dark: '#154350', light: '#7fd6e0', accent: '#6fe36a', eyes: 4, frames: 4, spikes: 3 },
-  spitter: { form: 'blob', size: 30, body: '#2fb08a', dark: '#146049', light: '#8fffd8', accent: '#d9ff6a', eyes: 2, frames: 4 },
-  gloomOrb: { form: 'orb', size: 32, body: '#4a3f8f', dark: '#221a50', light: '#a89bff', accent: '#3ff0d0', eyes: 1, frames: 4, glow: true },
-  stalker: { form: 'sprite', size: 28, body: '#243a6a', dark: '#0f1a38', light: '#6f8fd0', accent: '#ff4fa3', eyes: 2, frames: 4 },
-  stalkerElite: { form: 'sprite', size: 34, body: '#3a2060', dark: '#150a2a', light: '#9f7fe0', accent: '#ff4fa3', eyes: 3, frames: 4 },
-  fungling: { form: 'mushroom', size: 30, body: '#6f7fd0', dark: '#2f3a70', light: '#b8c4ff', accent: '#6fe36a', eyes: 2, frames: 3 },
-  shrieker: { form: 'plant', size: 32, body: '#7f4fa0', dark: '#3a1e50', light: '#c89fe0', accent: '#3ff0d0', eyes: 1, frames: 3 },
-  burrower: { form: 'worm', size: 30, body: '#3f6f5a', dark: '#1c3a2c', light: '#8fd0b0', accent: '#ffd166', eyes: 2, frames: 4 },
+  batling: {
+    form: 'flyer', height: 0.7, radius: 0.36, skin: 'flesh',
+    body: [0.35, 0.36, 0.6], dark: [0.14, 0.15, 0.28], light: [0.6, 0.62, 0.9],
+    glow: [0.3, 1.0, 0.85], eyes: 2, wings: 1.1, float: true,
+  },
+  crawler: {
+    form: 'spider', height: 0.95, radius: 0.55, skin: 'flesh',
+    body: [0.2, 0.45, 0.5], dark: [0.08, 0.2, 0.24], light: [0.4, 0.7, 0.78],
+    glow: [0.4, 1.0, 0.9], eyes: 6, legs: 8,
+  },
+  spitter: {
+    form: 'blob', height: 1.3, radius: 0.55, skin: 'flesh',
+    body: [0.2, 0.6, 0.48], dark: [0.08, 0.26, 0.2], light: [0.45, 0.85, 0.72],
+    glow: [0.65, 1.0, 0.4], eyes: 2, cap: true,
+  },
+  gloomOrb: {
+    form: 'orb', height: 1.7, radius: 0.5, skin: 'crystal',
+    body: [0.35, 0.28, 0.62], dark: [0.14, 0.1, 0.28], light: [0.62, 0.55, 0.95],
+    glow: [0.55, 0.4, 1.0], eyes: 1, float: true,
+  },
+  stalker: {
+    form: 'biped', height: 2.0, radius: 0.4, skin: 'flesh',
+    body: [0.16, 0.2, 0.35], dark: [0.06, 0.08, 0.16], light: [0.35, 0.42, 0.62],
+    glow: [1.0, 0.25, 0.5], eyes: 2, gaunt: true,
+  },
+  burrower: {
+    form: 'worm', height: 1.1, radius: 0.5, skin: 'flesh',
+    body: [0.28, 0.45, 0.38], dark: [0.12, 0.2, 0.16], light: [0.5, 0.72, 0.62],
+    glow: [1.0, 0.8, 0.35], eyes: 2,
+  },
+  stalkerElite: {
+    form: 'biped', height: 2.5, radius: 0.5, skin: 'bone',
+    body: [0.25, 0.14, 0.4], dark: [0.1, 0.05, 0.18], light: [0.5, 0.34, 0.72],
+    glow: [1.0, 0.3, 0.65], eyes: 3, gaunt: true,
+  },
 
   // ---- floor 3 ----------------------------------------------------------
-  emberling: { form: 'wisp', size: 22, body: '#ff7a2f', dark: '#a8390a', light: '#ffd98a', accent: '#fff3b0', eyes: 2, frames: 4, glow: true },
-  forgeGolem: { form: 'golem', size: 38, body: '#7a4630', dark: '#3a1c10', light: '#c98a5c', accent: '#ff9d3c', eyes: 2, frames: 3 },
-  golemElite: { form: 'golem', size: 46, body: '#8f3a20', dark: '#451208', light: '#e08a50', accent: '#ffd93d', eyes: 3, frames: 3 },
-  cinderMoth: { form: 'moth', size: 26, body: '#e0693c', dark: '#802a10', light: '#ffc08a', accent: '#ffd93d', eyes: 2, frames: 4 },
-  slagHound: { form: 'hound', size: 30, body: '#5a3020', dark: '#2a1208', light: '#a86040', accent: '#ff7a2f', eyes: 2, frames: 4 },
-  slagAlpha: { form: 'hound', size: 38, body: '#8a3a18', dark: '#40170a', light: '#e07a40', accent: '#ffd93d', eyes: 3, frames: 4 },
-  bellowsImp: { form: 'imp', size: 28, body: '#c04a2a', dark: '#601a0c', light: '#ff9a70', accent: '#ffe066', eyes: 2, frames: 4 },
-  anvilTurret: { form: 'turret', size: 34, body: '#6a5040', dark: '#2f2018', light: '#b09070', accent: '#ff9d3c', eyes: 1, frames: 3 },
-  magmite: { form: 'orb', size: 28, body: '#d0502a', dark: '#701c0c', light: '#ffa070', accent: '#ffd93d', eyes: 2, frames: 4 },
+  emberling: {
+    form: 'orb', height: 1.0, radius: 0.3, skin: 'crystal',
+    body: [1.0, 0.5, 0.18], dark: [0.45, 0.18, 0.05], light: [1.0, 0.8, 0.45],
+    glow: [1.0, 0.55, 0.15], eyes: 2, float: true,
+  },
+  forgeGolem: {
+    form: 'golem', height: 2.3, radius: 0.75, skin: 'metal',
+    body: [0.48, 0.32, 0.24], dark: [0.2, 0.13, 0.1], light: [0.72, 0.5, 0.36],
+    glow: [1.0, 0.6, 0.2], eyes: 2,
+  },
+  slagHound: {
+    form: 'quadruped', height: 1.25, radius: 0.5, skin: 'metal',
+    body: [0.4, 0.24, 0.16], dark: [0.17, 0.1, 0.06], light: [0.65, 0.4, 0.26],
+    glow: [1.0, 0.45, 0.12], eyes: 2, spikes: 7,
+  },
+  bellowsImp: {
+    form: 'flyer', height: 1.0, radius: 0.4, skin: 'flesh',
+    body: [0.7, 0.3, 0.18], dark: [0.3, 0.12, 0.06], light: [1.0, 0.55, 0.35],
+    glow: [1.0, 0.8, 0.3], eyes: 2, wings: 0.9, float: true,
+  },
+  anvilTurret: {
+    form: 'turret', height: 1.5, radius: 0.6, skin: 'metal',
+    body: [0.42, 0.34, 0.28], dark: [0.18, 0.14, 0.11], light: [0.66, 0.55, 0.45],
+    glow: [1.0, 0.6, 0.25], eyes: 1,
+  },
+  golemElite: {
+    form: 'golem', height: 3.0, radius: 0.95, skin: 'metal',
+    body: [0.55, 0.24, 0.14], dark: [0.24, 0.1, 0.05], light: [0.85, 0.45, 0.24],
+    glow: [1.0, 0.8, 0.25], eyes: 3,
+  },
 
   // ---- floor 4 ----------------------------------------------------------
-  lavaSlug: { form: 'blob', size: 32, body: '#e04a1a', dark: '#7a1a06', light: '#ffb060', accent: '#ffe066', eyes: 2, frames: 4, glow: true },
-  pyroWisp: { form: 'wisp', size: 22, body: '#ff9040', dark: '#b03a08', light: '#fff0c0', accent: '#ffffff', eyes: 0, frames: 4, glow: true },
-  obsidianKnight: { form: 'knight', size: 34, body: '#2a2438', dark: '#100c18', light: '#6a5f80', accent: '#ff5722', eyes: 2, frames: 3 },
-  knightElite: { form: 'knight', size: 42, body: '#3a2040', dark: '#150818', light: '#8a6a9a', accent: '#ff2e63', eyes: 3, frames: 3 },
-  geyserMouth: { form: 'maw', size: 34, body: '#4a1f14', dark: '#1f0a06', light: '#a04a28', accent: '#ff5722', eyes: 0, frames: 3 },
-  flameDancer: { form: 'sprite', size: 28, body: '#ff5f3c', dark: '#8a1c08', light: '#ffc0a0', accent: '#ffe066', eyes: 2, frames: 4 },
-  ashRevenant: { form: 'knight', size: 32, body: '#5a5450', dark: '#252220', light: '#a09890', accent: '#ff5722', eyes: 2, frames: 3 },
-  pyroTyrant: { form: 'sprite', size: 38, body: '#ff3c2a', dark: '#8a1000', light: '#ffd0a0', accent: '#ffe066', eyes: 3, frames: 4, crown: true },
+  lavaSlug: {
+    form: 'blob', height: 1.2, radius: 0.7, skin: 'crystal',
+    body: [0.85, 0.32, 0.12], dark: [0.35, 0.11, 0.03], light: [1.0, 0.65, 0.3],
+    glow: [1.0, 0.45, 0.1], eyes: 2, cap: false,
+  },
+  pyroWisp: {
+    form: 'orb', height: 1.8, radius: 0.3, skin: 'crystal',
+    body: [1.0, 0.6, 0.25], dark: [0.5, 0.22, 0.06], light: [1.0, 0.9, 0.6],
+    glow: [1.0, 0.7, 0.25], eyes: 0, float: true,
+  },
+  obsidianKnight: {
+    form: 'biped', height: 2.2, radius: 0.55, skin: 'metal',
+    body: [0.14, 0.12, 0.18], dark: [0.05, 0.04, 0.07], light: [0.35, 0.3, 0.42],
+    glow: [1.0, 0.3, 0.15], eyes: 2, armored: true,
+  },
+  geyserMouth: {
+    form: 'turret', height: 1.1, radius: 0.8, skin: 'rubble',
+    body: [0.3, 0.16, 0.12], dark: [0.12, 0.06, 0.04], light: [0.55, 0.3, 0.2],
+    glow: [1.0, 0.4, 0.1], eyes: 0,
+  },
+  flameDancer: {
+    form: 'biped', height: 1.9, radius: 0.4, skin: 'flesh',
+    body: [1.0, 0.4, 0.25], dark: [0.45, 0.14, 0.06], light: [1.0, 0.75, 0.5],
+    glow: [1.0, 0.85, 0.3], eyes: 2, gaunt: true,
+  },
+  knightElite: {
+    form: 'biped', height: 2.8, radius: 0.7, skin: 'metal',
+    body: [0.2, 0.1, 0.24], dark: [0.08, 0.03, 0.1], light: [0.45, 0.28, 0.5],
+    glow: [1.0, 0.2, 0.45], eyes: 3, armored: true,
+  },
 
   // ---- floor 5 ----------------------------------------------------------
-  prismSprite: { form: 'sprite', size: 26, body: '#4fe1ff', dark: '#1a6a90', light: '#e0fbff', accent: '#ff4fa3', eyes: 2, frames: 4, glow: true },
-  gemGolem: { form: 'golem', size: 40, body: '#7c5ad0', dark: '#341f68', light: '#c4a8ff', accent: '#ffe14f', eyes: 2, frames: 3 },
-  hoardMimic: { form: 'mimic', size: 32, body: '#a8781f', dark: '#503608', light: '#ffd93d', accent: '#ff4fa3', eyes: 2, frames: 4 },
-  mimicKing: { form: 'mimic', size: 42, body: '#d0a02a', dark: '#6a4a08', light: '#ffe98a', accent: '#ff4fa3', eyes: 3, frames: 4, crown: true },
-  lightWeaver: { form: 'orb', size: 32, body: '#ffe14f', dark: '#9a7a08', light: '#fffbd0', accent: '#4fe1ff', eyes: 1, frames: 4, glow: true },
-  weaverElite: { form: 'orb', size: 40, body: '#ffffff', dark: '#8a8ab0', light: '#ffffff', accent: '#ff4fa3', eyes: 3, frames: 4, glow: true },
-  shardHound: { form: 'hound', size: 30, body: '#7cff6b', dark: '#2a7a20', light: '#d8ffd0', accent: '#4fe1ff', eyes: 2, frames: 4 },
-  dragonWhelp: { form: 'dragon', size: 34, body: '#ff8b3d', dark: '#8a3a08', light: '#ffd0a0', accent: '#4fe1ff', eyes: 2, frames: 4 },
+  prismSprite: {
+    form: 'orb', height: 1.6, radius: 0.32, skin: 'crystal',
+    body: [0.4, 0.85, 1.0], dark: [0.14, 0.35, 0.45], light: [0.85, 0.98, 1.0],
+    glow: [0.35, 0.9, 1.0], eyes: 2, float: true,
+  },
+  gemGolem: {
+    form: 'golem', height: 2.6, radius: 0.85, skin: 'crystal',
+    body: [0.5, 0.36, 0.85], dark: [0.2, 0.14, 0.38], light: [0.78, 0.62, 1.0],
+    glow: [1.0, 0.85, 0.3], eyes: 2,
+  },
+  hoardMimic: {
+    form: 'mimic', height: 1.3, radius: 0.7, skin: 'metal',
+    body: [0.65, 0.48, 0.16], dark: [0.28, 0.2, 0.06], light: [1.0, 0.82, 0.3],
+    glow: [1.0, 0.3, 0.6], eyes: 2,
+  },
+  shardHound: {
+    form: 'quadruped', height: 1.2, radius: 0.48, skin: 'crystal',
+    body: [0.45, 1.0, 0.42], dark: [0.18, 0.42, 0.16], light: [0.75, 1.0, 0.72],
+    glow: [0.35, 0.95, 1.0], eyes: 2, spikes: 8,
+  },
+  dragonWhelp: {
+    form: 'dragon', height: 1.6, radius: 0.6, skin: 'flesh',
+    body: [1.0, 0.55, 0.24], dark: [0.42, 0.2, 0.07], light: [1.0, 0.8, 0.55],
+    glow: [0.35, 0.9, 1.0], eyes: 2, wings: 1.2, float: true,
+  },
+  mimicKing: {
+    form: 'mimic', height: 2.0, radius: 1.0, skin: 'metal',
+    body: [0.82, 0.62, 0.18], dark: [0.36, 0.26, 0.07], light: [1.0, 0.9, 0.4],
+    glow: [1.0, 0.3, 0.65], eyes: 3,
+  },
 
   // ---- bosses -----------------------------------------------------------
-  // Bark-brown body so he never blends into the grove's green floor.
-  leshy: { form: 'leshy', size: 92, body: '#7a5330', dark: '#3a2614', light: '#b98a4e', accent: '#ffd24a', eyes: 2, frames: 4 },
-  chiroptera: { form: 'bat', size: 96, body: '#6f5fd0', dark: '#2a2060', light: '#c8b8ff', accent: '#3ff0d0', eyes: 3, frames: 4, crown: true },
-  bellowsmith: { form: 'golem', size: 100, body: '#8a4a28', dark: '#3a1a0c', light: '#e09050', accent: '#ffd93d', eyes: 2, frames: 3 },
-  ignarok: { form: 'maw', size: 104, body: '#c02a10', dark: '#5a0c02', light: '#ff9050', accent: '#ffe066', eyes: 3, frames: 4 },
-  chromadrake: { form: 'dragon', size: 116, body: '#b06bff', dark: '#3a1a70', light: '#ffd0ff', accent: '#ffe14f', eyes: 2, frames: 4, crown: true },
-
-  // ---- allies / familiars -----------------------------------------------
-  familiar: { form: 'wisp', size: 18, body: '#7cff6b', dark: '#2a7a20', light: '#e0ffd0', accent: '#ffffff', eyes: 0, frames: 4, glow: true },
-  ally: { form: 'sprite', size: 22, body: '#4fe1ff', dark: '#1a6a90', light: '#e0fbff', accent: '#ffffff', eyes: 2, frames: 4, glow: true },
-  player: { form: 'player', size: 28, body: '#f0e6d2', dark: '#8a6a4a', light: '#ffffff', accent: '#4fe1ff', eyes: 2, frames: 6 },
+  leshy: {
+    form: 'boss_leshy', height: 4.2, radius: 1.5, skin: 'bone',
+    body: [0.42, 0.32, 0.18], dark: [0.18, 0.13, 0.07], light: [0.68, 0.55, 0.3],
+    glow: [0.8, 1.0, 0.35], eyes: 2,
+  },
+  chiroptera: {
+    form: 'boss_bat', height: 3.6, radius: 1.4, skin: 'flesh',
+    body: [0.35, 0.28, 0.6], dark: [0.14, 0.1, 0.26], light: [0.62, 0.55, 0.95],
+    glow: [0.35, 1.0, 0.9], eyes: 3, wings: 3.0, float: true,
+  },
+  bellowsmith: {
+    form: 'boss_golem', height: 4.4, radius: 1.6, skin: 'metal',
+    body: [0.5, 0.26, 0.14], dark: [0.22, 0.1, 0.05], light: [0.8, 0.45, 0.24],
+    glow: [1.0, 0.65, 0.2], eyes: 2,
+  },
+  ignarok: {
+    form: 'boss_maw', height: 3.4, radius: 2.0, skin: 'rubble',
+    body: [0.5, 0.18, 0.1], dark: [0.2, 0.06, 0.03], light: [0.85, 0.4, 0.2],
+    glow: [1.0, 0.45, 0.12], eyes: 3,
+  },
+  chromadrake: {
+    form: 'boss_dragon', height: 5.0, radius: 2.2, skin: 'crystal',
+    body: [0.65, 0.42, 1.0], dark: [0.26, 0.16, 0.45], light: [0.9, 0.75, 1.0],
+    glow: [1.0, 0.35, 0.75], eyes: 2, wings: 4.0,
+  },
 };
 
-export function creatureArt(sprite) {
-  return CREATURE_ART[sprite] || CREATURE_ART.slime;
+export function creatureArt(id) {
+  return CREATURE_ART[id] || CREATURE_ART.sporeling;
 }

@@ -1,59 +1,49 @@
 /**
  * The simulation core.
  *
- * Owns the run, the floors, the current room and every entity in it. Contains
- * no reference to `window`, `document`, `localStorage`, audio or canvas: side
- * effects leave through `this.events` and come back as an InputSnapshot. That
- * is what makes the same code runnable in a browser, in Electron/Tauri, or
+ * Owns the run, the dungeon, the player and every entity in it. Contains no
+ * reference to `window`, `document`, `localStorage`, WebGL or Web Audio: side
+ * effects leave through `this.events` and come back as an InputSnapshot. That is
+ * what makes the same code runnable in a browser, in Electron/Tauri, or
  * head-less inside the test harness.
  */
 import {
-  TILE,
-  ROOM_W,
-  ROOM_H,
-  T,
+  CELL,
+  WALL_H,
+  GRID_W,
+  GRID_H,
+  C,
   TEAM,
-  DIR,
-  DIR_OPPOSITE,
-  ROOM_KIND,
-  HEART_HP,
+  PLAYER,
+  isOpen,
 } from './constants.js';
 import { Rng } from './rng.js';
 import { EventBus } from './events.js';
-import { generateFloor } from './world/floorgen.js';
-import { DOOR_TILE } from './world/roomgen.js';
+import { generateDungeon, ROOM_KIND, cellAtWorld, roomAtWorld } from './world/dungeongen.js';
+import { NavField } from './world/nav.js';
+import { blocked, findFreeSpot, hasLineOfSight, raycast } from './world/collision.js';
 import { ShotPool } from './entities/projectile.js';
 import { createEnemy, updateEnemy } from './entities/enemy.js';
-import { createPlayer, updatePlayer } from './entities/player.js';
-import { updateShots, updateEffects } from './combat.js';
-import {
-  addItem,
-  setActive,
-  recomputeStats,
-  runHook,
-  chargeActive,
-  hasItem,
-} from './items/inventory.js';
+import { createPlayer, updatePlayer, aimDirection } from './entities/player.js';
+import { updateShots, updateAreas } from './combat.js';
+import { addItem, setActive, recomputeStats, runHook, chargeActive, hasItem } from './items/inventory.js';
 import { cloneShot as cloneShotImpl } from './items/shots.js';
-import { circleBlocked, findFreeSpot, tileAtWorld, hasLineOfSight } from './world/collision.js';
+import { createBoss, updateBoss } from './bosses/index.js';
 import { FLOORS, getFloor, FLOOR_COUNT } from '../data/floors.js';
 import { ITEMS, ITEM_IDS, ACTIVES, ACTIVE_IDS } from '../data/items.js';
 import { ENEMIES } from '../data/enemies.js';
-import { createBoss, updateBoss } from './bosses/index.js';
-import { clamp, dist } from './math.js';
-
-const ROOM_PX_W = ROOM_W * TILE;
-const ROOM_PX_H = ROOM_H * TILE;
+import { SPRITE } from '../data/sprite-ids.js';
+import { clamp, lerp, dist2d, dist2dSq, angleDelta } from './math3.js';
 
 export const STATE = {
   TITLE: 'title',
   PLAYING: 'playing',
-  TRANSITION: 'transition',
-  ITEM_GET: 'itemGet',
   PAUSED: 'paused',
   DEAD: 'dead',
   WIN: 'win',
 };
+
+const NAV_INTERVAL = 0.22;
 
 export class Game {
   constructor(opts = {}) {
@@ -62,39 +52,64 @@ export class Game {
     this.seed = this.rng.seed;
 
     this.state = STATE.TITLE;
-    this.roomPxW = ROOM_PX_W;
-    this.roomPxH = ROOM_PX_H;
+    this.settings = {
+      filterStrength: 1,
+      brightness: 0,
+      wobble: true,
+      sensitivity: 0.0022,
+    };
 
     this.shots = new ShotPool(opts.shotCap || 420);
     this.enemies = [];
-    this.pickups = [];
     this.props = [];
-    this.effects = [];
-    this.allies = [];
+    this.areas = [];
+    this.pendingStrikes = [];
+    this.dynamicLights = [];
+    this.exploredCells = new Set();
 
-    this.player = createPlayer(ROOM_PX_W / 2, ROOM_PX_H / 2);
-    this.floor = null;
-    this.floorIndex = 1;
-    this.room = null;
-    this.roomVisitId = 0;
-    this.roomLocked = false;
+    this.player = createPlayer(0, 0);
+    this.dungeon = null;
+    this.floorDef = null;
+    this.floorIndex = 0;
+    this.nav = new NavField();
+    this.navTimer = 0;
+
+    this.torch = {
+      on: true,
+      charge: 1,
+      inner: 0.45,
+      outer: 0.85,
+      range: 19,
+      color: [1, 0.94, 0.82],
+    };
 
     this.timeScale = 1;
     this.timeScaleTarget = 1;
     this.timeScaleTimer = 0;
     this.enemyFireScale = 1;
     this.enemyShotSpeedScale = 1;
+    this.enemyShotSlow = 1;
 
     this.shakeMag = 0;
     this.shakeT = 0;
-    this.hitStop = 0;
-
-    this.transition = null;
-    this.pendingItem = null;
+    this.fade = 0;
+    this.fadeTarget = 0;
     this.messages = [];
+    this.objective = '';
+    this.prompt = '';
+    this.showMap = false;
+    this.debug = false;
+    this.best = null;
+    this.loopStats = null;
     this.packToken = { holder: null, t: 0 };
+    this.bossActive = false;
 
-    this.stats = {
+    this.stats = this.freshStats();
+    this.seenItems = new Set();
+  }
+
+  freshStats() {
+    return {
       kills: 0,
       damageTaken: 0,
       itemsTaken: 0,
@@ -103,11 +118,6 @@ export class Game {
       floorReached: 1,
       bossesKilled: 0,
     };
-
-    this.seenItems = new Set();
-    this.boss = null;
-    this.paused = false;
-    this.debug = false;
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -119,33 +129,26 @@ export class Game {
 
     this.shots.clear();
     this.enemies.length = 0;
-    this.pickups.length = 0;
     this.props.length = 0;
-    this.effects.length = 0;
-    this.allies.length = 0;
+    this.areas.length = 0;
+    this.pendingStrikes.length = 0;
+    this.dynamicLights.length = 0;
     this.messages.length = 0;
+    this.exploredCells.clear();
     this.seenItems.clear();
-    this.boss = null;
-    this.pendingItem = null;
-    this.transition = null;
+    this.showMap = false;
     this.timeScale = 1;
     this.timeScaleTarget = 1;
 
-    this.player = createPlayer(ROOM_PX_W / 2, ROOM_PX_H / 2);
+    this.player = createPlayer(0, 0);
     recomputeStats(this, this.player);
     this.player.hp = this.player.stats.maxHp;
     setActive(this.player, this.rng.pick(ACTIVE_IDS));
     recomputeStats(this, this.player);
 
-    this.stats = {
-      kills: 0,
-      damageTaken: 0,
-      itemsTaken: 0,
-      roomsCleared: 0,
-      time: 0,
-      floorReached: 1,
-      bossesKilled: 0,
-    };
+    this.torch.charge = 1;
+    this.torch.on = true;
+    this.stats = this.freshStats();
 
     this.floorIndex = 0;
     this.nextFloor();
@@ -159,31 +162,156 @@ export class Game {
       return;
     }
     const def = getFloor(this.floorIndex);
-    this.floor = generateFloor(this.rng.fork(`floor${this.floorIndex}`), def);
+    this.floorDef = def;
+    this.dungeon = generateDungeon(this.rng.fork(`floor${this.floorIndex}`), def);
     this.stats.floorReached = Math.max(this.stats.floorReached, this.floorIndex);
 
     this.enemies.length = 0;
-    this.shots.clear();
-    this.effects.length = 0;
-    this.pickups.length = 0;
     this.props.length = 0;
-    this.allies.length = 0;
-    this.boss = null;
+    this.areas.length = 0;
+    this.pendingStrikes.length = 0;
+    this.shots.clear();
+    this.exploredCells.clear();
+    this.bossActive = false;
 
+    this.player.x = this.dungeon.start.x;
+    this.player.z = this.dungeon.start.z;
+    this.player.px = this.player.x;
+    this.player.pz = this.player.z;
+    this.player.vx = this.player.vz = 0;
+    this.player.wardUsed = false;
     if (this.player.flags.reviveRefresh) this.player.reviveUsed = false;
-    this.enemyFireScale = 1;
 
-    const start = this.floor.rooms[this.floor.startRoom];
-    this.enterRoom(start, null, true);
+    this.torch.range = this.player.stats.torchRange;
+    this.torch.charge = Math.min(1, this.torch.charge + 0.35);
+
+    this.populateFloor();
+    this.nav.rebuild(this.dungeon.cells, this.gridX(this.player.x), this.gridZ(this.player.z));
+
     if (this.player.flags.fullMap) this.revealMap();
 
     runHook(this.player, 'onFloorStart', { game: this, player: this.player });
     this.events.emit('floorStart', { index: this.floorIndex, def });
-    this.message(`${def.name}`, def.subtitle, 2.6);
+    this.message(def.name, def.subtitle, 3);
+    this.objective = 'найди логово и убей то, что в нём живёт';
   }
 
-  revealMap() {
-    for (const r of this.floor.rooms) r.mapped = true;
+  /** Spread monsters, loot and props across the whole floor. */
+  populateFloor() {
+    const def = this.floorDef;
+    const d = this.dungeon;
+
+    for (const room of d.rooms) {
+      room.seen = false;
+      if (room.kind === ROOM_KIND.START) continue;
+
+      if (room.kind === ROOM_KIND.BOSS) {
+        const w = room.world();
+        const boss = createBoss(this, def.boss, w.x, w.z);
+        boss.dormant = true;
+        this.enemies.push(boss);
+        this.boss = boss;
+        continue;
+      }
+
+      if (room.kind === ROOM_KIND.TREASURE) {
+        const w = room.world();
+        this.addProp({ type: 'pedestal', x: w.x, z: w.z, itemId: this.pickItem('treasure') });
+        continue;
+      }
+
+      if (room.kind === ROOM_KIND.SHOP) {
+        const w = room.world();
+        for (let i = 0; i < 3; i++) {
+          const off = (i - 1) * 2.6;
+          const roll = this.rng.next();
+          const entry = roll < 0.55
+            ? { type: 'shop', kind: 'item', itemId: this.pickItem('shop'), price: this.rng.int(8, 16) }
+            : roll < 0.8
+              ? { type: 'shop', kind: 'heal', price: 5 }
+              : { type: 'shop', kind: 'battery', price: 4 };
+          entry.x = w.x + off;
+          entry.z = w.z;
+          this.addProp(entry);
+        }
+        continue;
+      }
+
+      // Normal / challenge rooms get a monster budget scaled by distance.
+      const mul = room.kind === ROOM_KIND.CHALLENGE ? 1.9 : 1;
+      const budget = (1.4 + room.depth * 0.55) * def.difficulty * mul;
+      this.spawnPack(room, budget);
+
+      if (room.kind === ROOM_KIND.CHALLENGE) {
+        const w = room.world();
+        this.addProp({ type: 'pedestal', x: w.x, z: w.z, itemId: this.pickItem('challenge'), locked: true, roomId: room.id });
+      }
+
+      // Scattered loot.
+      if (this.rng.chance(0.55)) {
+        const spot = this.randomSpotIn(room);
+        this.addProp({ type: 'pickup', kind: this.rng.pick(['shard', 'shard', 'heal', 'battery']), x: spot.x, z: spot.z });
+      }
+    }
+
+    // Batteries in corridors: the resource that paces the whole descent.
+    let placed = 0;
+    let guard = 0;
+    while (placed < 4 + this.floorIndex && guard++ < 400) {
+      const gx = this.rng.int(2, GRID_W - 3);
+      const gy = this.rng.int(2, GRID_H - 3);
+      if (this.dungeon.cells[gy * GRID_W + gx] !== C.FLOOR) continue;
+      if (this.dungeon.roomAt[gy * GRID_W + gx] >= 0) continue;
+      this.addProp({ type: 'pickup', kind: 'battery', x: (gx + 0.5) * CELL, z: (gy + 0.5) * CELL });
+      placed++;
+    }
+  }
+
+  spawnPack(room, budget) {
+    const def = this.floorDef;
+    const pool = def.enemies.map((id) => ({ id, weight: ENEMIES[id].weight || 1 }));
+    let spent = 0;
+    let guard = 0;
+    while (spent < budget && guard++ < 30) {
+      const pick = this.rng.weighted(pool);
+      const cost = ENEMIES[pick.id].cost || 1;
+      if (spent + cost > budget + 0.6) break;
+      spent += cost;
+      const spot = this.randomSpotIn(room);
+      const e = createEnemy(pick.id, spot.x, spot.z, {
+        hpScale: 1 + (this.floorIndex - 1) * 0.06,
+      });
+      e.homeRoom = room.id;
+      this.enemies.push(e);
+    }
+    if (def.elites && def.elites.length && this.rng.chance(def.eliteChance)) {
+      const spot = this.randomSpotIn(room);
+      const e = createEnemy(this.rng.pick(def.elites), spot.x, spot.z, { hpScale: 1 + (this.floorIndex - 1) * 0.08 });
+      e.homeRoom = room.id;
+      this.enemies.push(e);
+    }
+  }
+
+  randomSpotIn(room) {
+    for (let i = 0; i < 24; i++) {
+      const gx = this.rng.int(room.x, room.x + room.w - 1);
+      const gy = this.rng.int(room.y, room.y + room.h - 1);
+      const cell = this.dungeon.cells[gy * GRID_W + gx];
+      if (cell !== C.FLOOR) continue;
+      return { x: (gx + 0.5) * CELL, z: (gy + 0.5) * CELL };
+    }
+    const w = room.world();
+    return { x: w.x, z: w.z };
+  }
+
+  addProp(p) {
+    p.y = p.type === 'pickup' ? 0.55 : 0.8;
+    p.phase = this.rng.angle();
+    p.scale = p.type === 'pedestal' ? 0.8 : 0.5;
+    p.art = p.type === 'pickup' ? 'lantern' : p.type === 'shop' ? 'lantern' : 'prismSprite';
+    p.taken = false;
+    this.props.push(p);
+    return p;
   }
 
   win() {
@@ -191,290 +319,147 @@ export class Game {
     this.events.emit('win', { stats: this.stats });
   }
 
-  // ---------------------------------------------------------------- rooms
-
-  enterRoom(room, fromDir, instant = false) {
-    this.room = room;
-    this.roomVisitId++;
-    room.visited = true;
-    room.mapped = true;
-    for (let d = 0; d < 4; d++) {
-      const id = room.doors[d];
-      if (id != null && !room.secretSide[d]) this.floor.rooms[id].mapped = true;
-    }
-
-    this.shots.clear();
-    this.effects.length = 0;
-    this.enemies.length = 0;
-    this.boss = null;
-
-    // Place the player just inside the door they came through.
-    if (fromDir != null) {
-      const t = DOOR_TILE[fromDir];
-      const inX = fromDir === 1 ? -1.4 : fromDir === 3 ? 1.4 : 0;
-      const inY = fromDir === 0 ? 1.4 : fromDir === 2 ? -1.4 : 0;
-      this.player.x = (t.x + 0.5 + inX) * TILE;
-      this.player.y = (t.y + 0.5 + inY) * TILE;
-    } else if (instant) {
-      this.player.x = ROOM_PX_W / 2;
-      this.player.y = ROOM_PX_H / 2 + TILE;
-    }
-    this.player.px = this.player.x;
-    this.player.py = this.player.y;
-    this.player.vx = this.player.vy = 0;
-    this.player.wardUsed = false;
-
-    this.populateRoom(room);
-    this.roomLocked = this.enemies.length > 0;
-
-    runHook(this.player, 'onRoomEnter', { game: this, player: this.player, room });
-    this.events.emit('roomEnter', { room, locked: this.roomLocked });
-  }
-
-  populateRoom(room) {
-    this.pickups.length = 0;
-    this.props.length = 0;
-
-    if (room.kind === ROOM_KIND.BOSS && !room.cleared) {
-      this.spawnBossRoom(room);
-      return;
-    }
-    if (room.populated) {
-      // Restore anything the room is still holding (dropped items, stairs).
-      for (const p of room.props || []) this.props.push(p);
-      for (const p of room.pickupsLeft || []) this.pickups.push(p);
-      if (!room.cleared && room.enemySpec) this.spawnFromSpec(room);
-      return;
-    }
-    room.populated = true;
-    room.props = [];
-    room.pickupsLeft = [];
-
-    switch (room.kind) {
-      case ROOM_KIND.START:
-        room.cleared = true;
-        break;
-      case ROOM_KIND.TREASURE:
-        this.addProp(room, {
-          type: 'pedestal',
-          x: ROOM_PX_W / 2,
-          y: ROOM_PX_H / 2,
-          itemId: this.pickItem('treasure'),
-        });
-        room.cleared = true;
-        break;
-      case ROOM_KIND.SHOP:
-        this.buildShop(room);
-        room.cleared = true;
-        break;
-      case ROOM_KIND.SECRET:
-        this.addProp(room, {
-          type: 'pedestal',
-          x: ROOM_PX_W / 2,
-          y: ROOM_PX_H / 2,
-          itemId: this.pickItem('treasure'),
-        });
-        for (let i = 0; i < 4; i++) {
-          this.dropPickup(
-            ROOM_PX_W / 2 + this.rng.range(-70, 70),
-            ROOM_PX_H / 2 + this.rng.range(-50, 50),
-            this.rng.pick(['coin', 'coin', 'bomb', 'key', 'heart']),
-          );
-        }
-        room.cleared = true;
-        break;
-      case ROOM_KIND.CHALLENGE:
-        room.enemySpec = this.rollEnemySpec(room, 1.8);
-        this.spawnFromSpec(room);
-        this.addProp(room, {
-          type: 'pedestalLocked',
-          x: ROOM_PX_W / 2,
-          y: ROOM_PX_H / 2 - TILE,
-          itemId: this.pickItem('challenge'),
-        });
-        break;
-      default:
-        if (room.depth > 0) {
-          room.enemySpec = this.rollEnemySpec(room, 1);
-          this.spawnFromSpec(room);
-        } else {
-          room.cleared = true;
-        }
+  revealMap() {
+    for (const r of this.dungeon.rooms) r.seen = true;
+    for (let i = 0; i < this.dungeon.cells.length; i++) {
+      if (isOpen(this.dungeon.cells[i])) this.exploredCells.add(i);
     }
   }
 
-  addProp(room, prop) {
-    prop.id = (room.props.length + 1) * 97 + room.id;
-    room.props.push(prop);
-    this.props.push(prop);
-    return prop;
+  // ---------------------------------------------------------------- helpers
+
+  gridX(x) {
+    return Math.floor(x / CELL);
+  }
+  gridZ(z) {
+    return Math.floor(z / CELL);
   }
 
-  buildShop(room) {
-    const def = this.floor.def;
-    const slots = 3;
-    for (let i = 0; i < slots; i++) {
-      const x = ROOM_PX_W / 2 + (i - 1) * TILE * 3;
-      const y = ROOM_PX_H / 2;
-      const roll = this.rng.next();
-      let entry;
-      if (roll < 0.5) {
-        entry = { type: 'shopItem', kind: 'item', itemId: this.pickItem('shop'), price: this.rng.int(12, 20) };
-      } else if (roll < 0.68) {
-        entry = { type: 'shopItem', kind: 'heart', price: 5 };
-      } else if (roll < 0.82) {
-        entry = { type: 'shopItem', kind: 'bomb', price: 4 };
-      } else {
-        entry = { type: 'shopItem', kind: 'key', price: 4 };
-      }
-      entry.x = x;
-      entry.y = y;
-      this.addProp(room, entry);
-    }
+  camera(alpha) {
+    const p = this.player;
+    const bob = Math.sin(p.bobPhase * 2) * p.bobAmount;
+    const sway = Math.cos(p.bobPhase) * p.bobAmount * 0.6;
+    return {
+      x: lerp(p.px, p.x, alpha) + Math.cos(p.yaw) * sway,
+      y: p.y + p.eyeHeight + bob - p.kickY,
+      z: lerp(p.pz, p.z, alpha) - Math.sin(p.yaw) * sway,
+      yaw: p.yaw,
+      pitch: p.pitch - p.recoil * 0.16,
+    };
   }
 
-  rollEnemySpec(room, mul = 1) {
-    const def = this.floor.def;
-    // Enough bodies that a room is a fight, scaled by how deep it sits in the
-    // floor graph so the first rooms stay approachable.
-    const budget = (2.4 + room.depth * 0.7) * def.difficulty * mul;
-    const pool = def.enemies.map((id) => ({ id, weight: ENEMIES[id].weight || 1 }));
-    const spec = [];
-    let spent = 0;
-    let guard = 0;
-    while (spent < budget && guard++ < 40) {
-      const pick = this.rng.weighted(pool);
-      const cost = ENEMIES[pick.id].cost || 1;
-      if (spent + cost > budget + 0.8) break;
-      spent += cost;
-      spec.push(pick.id);
-    }
-    if (!spec.length) spec.push(def.enemies[0]);
-    if (this.rng.chance(def.eliteChance * mul) && def.elites && def.elites.length) {
-      spec.push(this.rng.pick(def.elites));
-    }
-    return spec;
+  fov() {
+    const p = this.player;
+    // A touch of FOV widening while sprinting sells the speed.
+    return (72 + (p.sprinting ? 7 : 0)) * (Math.PI / 180);
   }
 
-  spawnFromSpec(room) {
-    const spec = room.enemySpec || [];
-    const cx = ROOM_PX_W / 2;
-    const cy = ROOM_PX_H / 2;
-    for (let i = 0; i < spec.length; i++) {
-      const a = (i / spec.length) * Math.PI * 2 + this.rng.range(-0.3, 0.3);
-      const r = this.rng.range(60, 150);
-      let x = clamp(cx + Math.cos(a) * r, TILE * 1.5, ROOM_PX_W - TILE * 1.5);
-      let y = clamp(cy + Math.sin(a) * r * 0.7, TILE * 1.5, ROOM_PX_H - TILE * 1.5);
-      const def = ENEMIES[spec[i]];
-      const spot = findFreeSpot(room.tiles, x, y, def.radius, this.rng);
-      const e = createEnemy(spec[i], spot.x, spot.y, {
-        hpScale: 1 + (this.floorIndex - 1) * 0.08 + (this.player.flags.enemyHpMult || 0),
-        phase: this.rng.angle(),
-      });
-      this.enemies.push(e);
-    }
+  shakeAmount() {
+    return this.shakeT > 0 ? this.shakeMag * this.shakeT : 0;
   }
 
-  spawnBossRoom(room) {
-    const def = this.floor.def;
-    this.boss = createBoss(this, def.boss, ROOM_PX_W / 2, ROOM_PX_H / 2 - TILE);
-    this.enemies.push(this.boss);
-    this.roomLocked = true;
-    this.events.emit('bossStart', { boss: this.boss, name: this.boss.name });
-    this.sfx('bossRoar');
-    this.message(this.boss.name, this.boss.title || '', 2.4);
+  damageFlash() {
+    return clamp(this.player.hurtFlash, 0, 1);
   }
 
-  // ------------------------------------------------------------ item pools
-
-  pickItem(pool) {
-    const candidates = ITEM_IDS.filter(
-      (id) => ITEMS[id].pools.includes(pool) && !this.seenItems.has(id) && !hasItem(this.player.inv, id),
-    );
-    const list = candidates.length ? candidates : ITEM_IDS.filter((id) => ITEMS[id].pools.includes(pool));
-    if (!list.length) return ITEM_IDS[0];
-    const luck = this.player.stats ? this.player.stats.luck : 0;
-    const id = this.rng.weighted(list, (i) => {
-      const q = ITEMS[i].quality || 1;
-      return Math.max(0.2, 1 + (q - 2) * (0.18 + luck * 0.05));
-    });
-    this.seenItems.add(id);
-    return id;
+  fadeAmount() {
+    return this.fade;
   }
 
-  grantItem(id) {
-    const news = addItem(this, this.player, id);
-    this.stats.itemsTaken++;
-    this.pendingItem = { id, item: ITEMS[id], t: 0, synergies: news };
-    this.state = STATE.ITEM_GET;
-    this.sfx('item');
-    if (news.length) {
-      this.sfx('synergy');
-      this.events.emit('synergy', { synergies: news });
-    }
-    this.events.emit('itemGet', { id, item: ITEMS[id], synergies: news });
+  /** Is a world point inside the player's torch cone and lit? */
+  torchLightsPoint(x, z) {
+    if (!this.torch.on || this.torch.charge <= 0.02) return this.player.flags.nightVision > 0;
+    const p = this.player;
+    const dx = x - p.x;
+    const dz = z - p.z;
+    const d = Math.hypot(dx, dz);
+    if (d > this.torch.range) return false;
+    const a = Math.atan2(dx, dz);
+    return Math.abs(angleDelta(p.yaw, a)) < this.torch.outer * 1.1;
+  }
+
+  /** Is the player looking roughly at this entity, with line of sight? */
+  playerLooksAt(e) {
+    const p = this.player;
+    const a = Math.atan2(e.x - p.x, e.z - p.z);
+    if (Math.abs(angleDelta(p.yaw, a)) > 0.6) return false;
+    return hasLineOfSight(this.dungeon.cells, p.x, p.z, e.x, e.z, {});
+  }
+
+  toggleTorch() {
+    this.torch.on = !this.torch.on;
+    this.sfx('reloadTorch', { gain: 0.5 });
   }
 
   // ---------------------------------------------------------------- step
 
   step(dt, input) {
     if (this.state === STATE.TITLE || this.state === STATE.PAUSED) return;
-
-    if (this.state === STATE.ITEM_GET) {
-      this.pendingItem.t += dt;
-      if (this.pendingItem.t > 0.35 && (input.pressed.confirm || input.pressed.fire || input.pressed.cancel || input.pressed.pause)) {
-        this.pendingItem = null;
-        this.state = STATE.PLAYING;
-      }
-      this.updateShake(dt);
-      return;
-    }
-
-    if (this.state === STATE.TRANSITION) {
-      this.transition.t += dt;
-      if (this.transition.t >= this.transition.duration) {
-        const tr = this.transition;
-        this.transition = null;
-        this.state = STATE.PLAYING;
-        this.enterRoom(this.floor.rooms[tr.toRoom], tr.fromDir);
-      }
-      this.updateShake(dt);
-      return;
-    }
-
     if (this.state !== STATE.PLAYING) {
-      this.updateShake(dt);
+      this.updateTimers(dt);
       return;
     }
 
     this.stats.time += dt;
-
-    // Hit-stop makes impacts land without slowing the whole sim.
-    if (this.hitStop > 0) {
-      this.hitStop -= dt;
-      this.updateShake(dt);
-      return;
-    }
 
     if (this.timeScaleTimer > 0) {
       this.timeScaleTimer -= dt;
       if (this.timeScaleTimer <= 0) this.timeScaleTarget = 1;
     }
     this.timeScale += (this.timeScaleTarget - this.timeScale) * Math.min(1, dt * 4);
-
+    this.enemyShotSlow = this.timeScale;
     const sdt = dt * this.timeScale;
 
-    for (const m of this.messages) m.t += dt;
-    while (this.messages.length && this.messages[0].t > this.messages[0].time) this.messages.shift();
+    this.updateTimers(dt);
 
     if (!this.player.dead) updatePlayer(this, this.player, sdt, input);
+
+    // Torch battery: the pacing mechanism of the whole game.
+    if (this.torch.on && this.torch.charge > 0) {
+      this.torch.charge = Math.max(0, this.torch.charge - this.player.stats.torchDrain * sdt);
+      if (this.torch.charge === 0) {
+        this.message('ФОНАРЬ СЕЛ', 'найди батарею', 2.2);
+        this.sfx('deny');
+      }
+    }
+    this.torch.range = this.player.stats.torchRange;
+    if (this.player.flags.wideTorch) {
+      this.torch.inner = 0.6;
+      this.torch.outer = 1.05;
+    }
+
+    // Navigation field: one BFS a few times a second serves every monster.
+    this.navTimer -= dt;
+    if (this.navTimer <= 0) {
+      this.navTimer = NAV_INTERVAL;
+      this.nav.rebuild(this.dungeon.cells, this.gridX(this.player.x), this.gridZ(this.player.z));
+    }
 
     if (this.packToken.holder) {
       this.packToken.t -= sdt;
       if (this.packToken.t <= 0 || !this.packToken.holder.alive) this.packToken.holder = null;
     }
 
-    // Enemies
+    this.updateEnemies(sdt);
+    updateShots(this, sdt);
+    updateAreas(this, sdt);
+    this.updateStrikes(sdt);
+    this.updateProps(dt);
+    this.updateExploration();
+    this.updateDynamicLights();
+
+    if (this.player.hp <= 0 && !this.player.dead) this.killPlayer();
+  }
+
+  updateTimers(dt) {
+    if (this.shakeT > 0) this.shakeT -= dt;
+    for (const m of this.messages) m.t += dt;
+    while (this.messages.length && this.messages[0].t > this.messages[0].time) this.messages.shift();
+    this.fade += (this.fadeTarget - this.fade) * Math.min(1, dt * 3);
+  }
+
+  updateEnemies(dt) {
+    const p = this.player;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (!e.alive) {
@@ -482,319 +467,171 @@ export class Game {
         if (e.dying <= 0) this.enemies.splice(i, 1);
         continue;
       }
-      if (e.isBoss) updateBoss(this, e, sdt);
-      else updateEnemy(this, e, sdt);
-      if (e.alive) this.enemyTouchPlayer(e, sdt);
-    }
 
-    this.updateAllies(sdt);
-    updateShots(this, sdt);
-    updateEffects(this, sdt);
-    this.updatePickups(sdt);
-    this.updateProps(sdt);
-    this.updateDoors(sdt);
-    this.updateShake(dt);
-
-    if (this.roomLocked && !this.enemies.some((e) => e.alive)) this.clearRoom();
-    if (this.player.hp <= 0 && !this.player.dead) this.killPlayer();
-  }
-
-  updateShake(dt) {
-    if (this.shakeT > 0) {
-      this.shakeT -= dt;
-      if (this.shakeT <= 0) this.shakeMag = 0;
-    }
-  }
-
-  clearRoom() {
-    this.roomLocked = false;
-    this.room.cleared = true;
-    this.stats.roomsCleared++;
-    this.sfx('roomClear');
-    this.sfx('doorOpen', { gain: 0.5 });
-    if (chargeActive(this.player, 1)) this.events.emit('activeReady', {});
-    runHook(this.player, 'onRoomClear', { game: this, player: this.player, room: this.room });
-
-    // Locked challenge reward unlocks on clear.
-    for (const p of this.props) {
-      if (p.type === 'pedestalLocked') p.type = 'pedestal';
-    }
-
-    if (this.room.kind === ROOM_KIND.BOSS) {
-      this.stats.bossesKilled++;
-      this.addProp(this.room, { type: 'stairs', x: ROOM_PX_W / 2, y: ROOM_PX_H / 2 + TILE * 1.5 });
-      this.addProp(this.room, {
-        type: 'pedestal',
-        x: ROOM_PX_W / 2,
-        y: ROOM_PX_H / 2 - TILE * 1.2,
-        itemId: this.pickItem('boss'),
-      });
-      for (let i = 0; i < 4; i++) {
-        this.dropPickup(ROOM_PX_W / 2 + this.rng.range(-80, 80), ROOM_PX_H / 2 + this.rng.range(-40, 40), 'coin');
+      // Sleep far-away monsters: this is what keeps a whole populated floor
+      // affordable at 60 FPS.
+      const d2 = dist2dSq(e.x, e.z, p.x, p.z);
+      if (d2 > 2500 && !e.isBoss) {
+        e.px = e.x;
+        e.pz = e.z;
+        continue;
       }
-      this.dropPickup(ROOM_PX_W / 2 - 40, ROOM_PX_H / 2 + 40, 'heart');
-      this.events.emit('bossDown', { floor: this.floorIndex });
-    } else {
-      this.rollRoomReward();
-    }
-    this.events.emit('roomClear', { room: this.room });
-  }
 
-  rollRoomReward() {
-    const luck = this.player.stats.luck;
-    const roll = this.rng.next() + luck * 0.02;
-    const x = ROOM_PX_W / 2;
-    const y = ROOM_PX_H / 2;
-    if (roll > 0.86) this.dropPickup(x, y, 'heart');
-    else if (roll > 0.7) this.dropPickup(x, y, 'coin');
-    else if (roll > 0.62) this.dropPickup(x, y, 'bomb');
-    else if (roll > 0.55) this.dropPickup(x, y, 'key');
-  }
-
-  // ---------------------------------------------------------------- doors
-
-  updateDoors(dt) {
-    if (this.roomLocked) return;
-    const p = this.player;
-    const margin = TILE * 0.55;
-    for (let d = 0; d < 4; d++) {
-      const targetId = this.room.doors[d];
-      if (targetId == null) continue;
-      const t = DOOR_TILE[d];
-      const dx = (t.x + 0.5) * TILE;
-      const dy = (t.y + 0.5) * TILE;
-      if (Math.abs(p.x - dx) > margin + 10 || Math.abs(p.y - dy) > margin + 10) continue;
-
-      if (this.room.secretSide[d] && !this.room.secretOpen) continue;
-
-      if (this.room.locked[d]) {
-        if (p.keys > 0 || p.flags.freeUnlock) {
-          if (!p.flags.freeUnlock) p.keys--;
-          this.room.locked[d] = false;
-          const other = this.floor.rooms[targetId];
-          other.locked[DIR_OPPOSITE[d]] = false;
-          this.sfx('unlock');
-        } else {
-          this.sfx('doorLocked');
-          // Push the player back out of the doorway.
-          p.x -= DIR[d].x * 6;
-          p.y -= DIR[d].y * 6;
-          continue;
+      if (e.isBoss) {
+        if (e.dormant) {
+          const room = this.dungeon.rooms[this.dungeon.bossRoom];
+          if (room.contains(this.gridX(p.x), this.gridZ(p.z))) {
+            e.dormant = false;
+            this.bossActive = true;
+            this.objective = `убей: ${e.name}`;
+            this.sfx('bossRoar', { x: e.x, y: e.y + 2, z: e.z, gain: 1 });
+            this.shake(1.6, 0.8);
+            this.message(e.name, e.title, 3);
+            this.events.emit('bossStart', { boss: e });
+          } else {
+            e.px = e.x;
+            e.pz = e.z;
+            continue;
+          }
         }
+        updateBoss(this, e, dt);
+      } else {
+        updateEnemy(this, e, dt);
       }
 
-      this.startTransition(targetId, DIR_OPPOSITE[d], d);
-      return;
+      if (e.alive) this.enemyTouchPlayer(e, dt);
     }
   }
 
-  startTransition(toRoom, fromDir, dir) {
-    this.state = STATE.TRANSITION;
-    this.transition = {
-      t: 0,
-      duration: 0.26,
-      fromRoom: this.room.id,
-      toRoom,
-      fromDir,
-      dir,
-    };
-    this.shots.clear();
-    this.events.emit('transition', this.transition);
+  enemyTouchPlayer(e, dt) {
+    const p = this.player;
+    if (p.dead || p.invuln > 0 || e.disguised || e.hidden) return;
+    if (e.contactCd > 0) return;
+    const rr = p.radius + e.radius;
+    if (dist2dSq(p.x, p.z, e.x, e.z) > rr * rr) return;
+    if (p.y + p.height < e.y || p.y > e.y + e.height) return;
+    e.contactCd = 0.8;
+    this.damagePlayer(e.touch, { source: 'contact', enemy: e });
+    runHook(p, 'onContact', { game: this, player: p, enemy: e });
+    // Push apart so contact damage cannot machine-gun.
+    const a = Math.atan2(p.x - e.x, p.z - e.z);
+    p.x += Math.sin(a) * 0.4;
+    p.z += Math.cos(a) * 0.4;
   }
 
-  teleportRandomRoom() {
-    const options = this.floor.rooms.filter(
-      (r) => r.id !== this.room.id && r.kind !== ROOM_KIND.BOSS && !r.hidden,
-    );
-    if (!options.length) return false;
-    const target = this.rng.pick(options);
-    this.enterRoom(target, null, true);
-    this.player.x = ROOM_PX_W / 2;
-    this.player.y = ROOM_PX_H / 2;
-    this.fx('teleport', { x: this.player.x, y: this.player.y, color: '#b06bff' });
-    this.sfx('teleport');
-    return true;
-  }
-
-  // -------------------------------------------------------------- pickups
-
-  dropPickup(x, y, kind) {
-    const spot = findFreeSpot(this.room.tiles, x, y, 6, this.rng);
-    const p = {
-      kind,
-      x: spot.x,
-      y: spot.y,
-      vx: this.rng.range(-30, 30),
-      vy: this.rng.range(-30, 30),
-      t: this.rng.angle(),
-      picked: false,
-    };
-    this.pickups.push(p);
-    return p;
-  }
-
-  updatePickups(dt) {
-    const pl = this.player;
-    const magnet = pl.flags.magnet || 26;
-    for (let i = this.pickups.length - 1; i >= 0; i--) {
-      const p = this.pickups[i];
-      p.t += dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.vx *= Math.pow(0.02, dt);
-      p.vy *= Math.pow(0.02, dt);
-      if (circleBlocked(this.room.tiles, p.x, p.y, 5)) {
-        p.x -= p.vx * dt;
-        p.y -= p.vy * dt;
-        p.vx = -p.vx * 0.4;
-        p.vy = -p.vy * 0.4;
-      }
-
-      const d = dist(p.x, p.y, pl.x, pl.y);
-      if (d < magnet) {
-        const s = Math.min(260, 90 + (magnet - d) * 5);
-        p.x += ((pl.x - p.x) / (d || 1)) * s * dt;
-        p.y += ((pl.y - p.y) / (d || 1)) * s * dt;
-      }
-      if (d < pl.radius + 8) {
-        this.collectPickup(p);
-        this.pickups.splice(i, 1);
-      }
+  updateStrikes(dt) {
+    for (let i = this.pendingStrikes.length - 1; i >= 0; i--) {
+      const s = this.pendingStrikes[i];
+      s.t -= dt;
+      if (s.t > 0) continue;
+      this.pendingStrikes.splice(i, 1);
+      this.explode(s.x, 0.7, s.z, s.radius, s.damage, TEAM.ENEMY, { color: s.color });
     }
   }
-
-  collectPickup(p) {
-    const pl = this.player;
-    switch (p.kind) {
-      case 'coin':
-        pl.coins += 1;
-        this.sfx('coin');
-        if (pl.flags.goldRush && this.rng.chance(0.1)) this.healPlayer(1);
-        pl.statsDirty = true;
-        break;
-      case 'key':
-        pl.keys += 1;
-        this.sfx('pickup');
-        break;
-      case 'bomb':
-        pl.bombs += 1;
-        this.sfx('pickup');
-        break;
-      case 'heart':
-        this.healPlayer(2);
-        this.sfx('heart');
-        break;
-      case 'halfHeart':
-        this.healPlayer(1);
-        this.sfx('heart');
-        break;
-      case 'soul':
-        pl.shield = Math.min(6, pl.shield + 2);
-        this.sfx('heart', { rate: 1.3 });
-        break;
-      default:
-        this.sfx('pickup');
-    }
-    this.fx('pickup', { x: p.x, y: p.y, kind: p.kind });
-  }
-
-  // ---------------------------------------------------------------- props
 
   updateProps(dt) {
-    const pl = this.player;
+    const p = this.player;
+    this.prompt = '';
+    const range = p.stats.pickupRange;
     for (let i = this.props.length - 1; i >= 0; i--) {
       const prop = this.props[i];
-      prop.t = (prop.t || 0) + dt;
-      const d = dist(prop.x, prop.y, pl.x, pl.y);
-      prop.near = d < 34;
+      const d = dist2d(prop.x, prop.z, p.x, p.z);
 
-      if (!prop.near) continue;
+      if (prop.type === 'pickup') {
+        if (d < range) {
+          this.collectPickup(prop);
+          this.props.splice(i, 1);
+        }
+        continue;
+      }
 
-      if (prop.type === 'pedestal' && d < 18 && !prop.taken) {
-        prop.taken = true;
-        this.props.splice(i, 1);
-        const idx = this.room.props.indexOf(prop);
-        if (idx >= 0) this.room.props.splice(idx, 1);
-        this.grantItem(prop.itemId);
-      } else if (prop.type === 'stairs' && d < 20) {
-        this.sfx('stairs');
-        this.events.emit('descend', { from: this.floorIndex });
-        this.nextFloor();
-        return;
-      } else if (prop.type === 'shopItem' && d < 20 && !prop.bought) {
-        this.tryBuy(prop, i);
+      if (d > 3.2) continue;
+
+      if (prop.type === 'pedestal') {
+        if (prop.locked && !this.roomCleared(prop.roomId)) {
+          this.prompt = 'сначала зачисти комнату';
+          continue;
+        }
+        this.prompt = `E — взять: ${ITEMS[prop.itemId].name}`;
+        if (this.interactPressed) {
+          this.props.splice(i, 1);
+          this.grantItem(prop.itemId);
+        }
+      } else if (prop.type === 'shop') {
+        const price = prop.price;
+        const label = prop.kind === 'item' ? ITEMS[prop.itemId].name : prop.kind === 'heal' ? 'аптечка' : 'батарея';
+        this.prompt = `E — купить: ${label}  (${price} ◈)`;
+        if (this.interactPressed) {
+          if (p.coins >= price) {
+            p.coins -= price;
+            this.props.splice(i, 1);
+            if (prop.kind === 'item') this.grantItem(prop.itemId);
+            else if (prop.kind === 'heal') this.healPlayer(4);
+            else {
+              this.torch.charge = 1;
+              this.sfx('reloadTorch');
+            }
+          } else {
+            this.sfx('deny');
+          }
+        }
       }
     }
-  }
 
-  tryBuy(prop, index) {
-    const pl = this.player;
-    const discount = pl.flags.discount || 0;
-    const price = Math.max(1, Math.round(prop.price * (1 - discount)));
-    if (pl.coins >= price) {
-      pl.coins -= price;
-      prop.bought = true;
-      this.props.splice(index, 1);
-      const ri = this.room.props.indexOf(prop);
-      if (ri >= 0) this.room.props.splice(ri, 1);
-      this.applyShopPurchase(prop);
-    } else if (pl.flags.bloodPayment && pl.hp > 2) {
-      this.damagePlayer(2, { source: 'blood', ignoreArmor: true, ignoreInvuln: true });
-      prop.bought = true;
-      this.props.splice(index, 1);
-      const ri = this.room.props.indexOf(prop);
-      if (ri >= 0) this.room.props.splice(ri, 1);
-      this.applyShopPurchase(prop);
-    } else {
-      if (!prop.denyT || prop.t - prop.denyT > 0.8) {
-        prop.denyT = prop.t;
-        this.sfx('deny');
-        this.message('Не хватает монет', '', 1.2);
-      }
-      const a = Math.atan2(pl.y - prop.y, pl.x - prop.x);
-      pl.x += Math.cos(a) * 5;
-      pl.y += Math.sin(a) * 5;
-    }
-  }
-
-  applyShopPurchase(prop) {
-    switch (prop.kind) {
-      case 'item':
-        this.grantItem(prop.itemId);
-        break;
-      case 'heart':
-        this.healPlayer(2);
-        this.sfx('heart');
-        break;
-      case 'bomb':
-        this.player.bombs += 2;
-        this.sfx('pickup');
-        break;
-      case 'key':
-        this.player.keys += 2;
-        this.sfx('pickup');
-        break;
-      default:
-        this.sfx('pickup');
-    }
-  }
-
-  rerollRoomItems() {
-    let any = false;
-    for (const prop of this.props) {
-      if (prop.type === 'pedestal' || prop.type === 'pedestalLocked') {
-        prop.itemId = this.pickItem('treasure');
-        any = true;
-      } else if (prop.type === 'shopItem' && prop.kind === 'item') {
-        prop.itemId = this.pickItem('shop');
-        any = true;
+    // Stairs.
+    const st = this.dungeon.stairs;
+    if (st.active) {
+      const d = dist2d(st.x, st.z, p.x, p.z);
+      if (d < 2.2) {
+        this.prompt = 'E — спуститься ниже';
+        if (this.interactPressed) {
+          this.sfx('stairs');
+          this.events.emit('descend', { from: this.floorIndex });
+          this.nextFloor();
+        }
       }
     }
-    if (any) this.sfx('confirm');
-    return any;
+    this.interactPressed = false;
   }
 
-  // --------------------------------------------------------------- combat
+  roomCleared(roomId) {
+    return !this.enemies.some((e) => e.alive && e.homeRoom === roomId);
+  }
+
+  updateExploration() {
+    const gx = this.gridX(this.player.x);
+    const gy = this.gridZ(this.player.z);
+    for (let y = gy - 3; y <= gy + 3; y++) {
+      for (let x = gx - 3; x <= gx + 3; x++) {
+        if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue;
+        if (!isOpen(this.dungeon.cells[y * GRID_W + x])) continue;
+        this.exploredCells.add(y * GRID_W + x);
+      }
+    }
+    const room = roomAtWorld(this.dungeon, this.player.x, this.player.z);
+    if (room && !room.seen) {
+      room.seen = true;
+      runHook(this.player, 'onRoomEnter', { game: this, player: this.player, room });
+    }
+  }
+
+  updateDynamicLights() {
+    this.dynamicLights.length = 0;
+    for (const e of this.enemies) {
+      if (e.alive && e.light && !e.dormant) this.dynamicLights.push(e.light);
+    }
+    this.shots.forEach((s) => {
+      if (s.lightRadius > 0 && this.dynamicLights.length < 10) {
+        this.dynamicLights.push({
+          x: s.x, y: s.y, z: s.z,
+          r: s.r, g: s.g, b: s.b,
+          radius: s.lightRadius, intensity: 0.9, flicker: 0, phase: 0,
+        });
+      }
+    });
+  }
+
+  // -------------------------------------------------------------- combat
 
   spawnShot(team) {
     const s = this.shots.acquire();
@@ -807,39 +644,13 @@ export class Game {
     return cloneShotImpl(this, src);
   }
 
-  shotColor(kind) {
-    switch (kind) {
-      case 'flame':
-      case 'dragonfire':
-        return '#ff9d3c';
-      case 'acid':
-        return '#8ede4a';
-      case 'gloom':
-        return '#a89bff';
-      case 'seed':
-        return '#d9ff9c';
-      case 'spark':
-        return '#ffe066';
-      case 'shrapnel':
-        return '#ffc08a';
-      case 'ash':
-        return '#c0b8b0';
-      case 'prism':
-        return '#4fe1ff';
-      default:
-        return '#ff6b9d';
-    }
-  }
-
-  nearestEnemy(x, y, range = 260, exclude = null) {
+  nearestEnemy(x, z, range = 20, exclude = null) {
     let best = null;
     let bestD = range * range;
     for (const e of this.enemies) {
       if (!e.alive || e.hidden || e.invulnerable || e.disguised) continue;
       if (exclude && exclude.has(e.uid)) continue;
-      const dx = e.x - x;
-      const dy = e.y - y;
-      const d2 = dx * dx + dy * dy;
+      const d2 = dist2dSq(e.x, e.z, x, z);
       if (d2 < bestD) {
         bestD = d2;
         best = e;
@@ -851,43 +662,43 @@ export class Game {
   damageEnemy(e, amount, opts = {}) {
     if (!e.alive || e.invulnerable) return 0;
     let dmg = amount;
-    if (opts.kind !== 'true' && e.armor) dmg = Math.max(1, dmg - e.armor);
+    if (!opts.trueDamage && e.armor) dmg = Math.max(1, dmg - e.armor);
     if (e.frozen > 0) dmg *= 1.25;
+    if (this.player.flags.mark && !e.marked) {
+      e.marked = true;
+      dmg *= this.player.flags.markCrit ? 2.4 : 2;
+      opts.crit = true;
+    }
     dmg = Math.max(0.5, dmg);
 
     e.hp -= dmg;
     e.flash = 0.09;
-    e.noRegenT = 2.5; // regenerating enemies must be punished for taking hits
+    e.noRegenT = 2.5;
+    // Being shot always reveals the player, even from the dark.
+    if (opts.source === 'shot' || opts.source === 'chain') {
+      e.aggro = 1;
+      e.ai.state = 'hunt';
+      e.ai.loseT = 6;
+    }
 
-    if (opts.knockback && e.knockbackResist < 1) {
-      const k = opts.knockback * (1 - e.knockbackResist);
-      const l = Math.hypot(opts.kx || 0, opts.ky || 0) || 1;
+    if (opts.knockback) {
+      const l = Math.hypot(opts.kx || 0, opts.kz || 0) || 1;
+      const k = opts.knockback * (e.isBoss ? 0.05 : 1);
       e.vx += ((opts.kx || 0) / l) * k;
-      e.vy += ((opts.ky || 0) / l) * k;
+      e.vz += ((opts.kz || 0) / l) * k;
     }
-    if (opts.burn) this.applyBurn(e, 2.2, 3 * opts.burn);
+    if (opts.burn) this.applyBurn(e, 3, 3 * opts.burn);
     if (opts.poison && this.rng.chance(opts.poison)) {
-      e.poison = Math.max(e.poison, 3.4);
-      e.poisonDps = Math.max(e.poisonDps, 2.4);
+      e.poison = Math.max(e.poison, 4);
+      e.poisonDps = Math.max(e.poisonDps, 2.5);
     }
-    if (opts.freeze && this.rng.chance(opts.freeze)) {
-      e.frozen = Math.max(e.frozen, 1.3);
-      this.fx('freeze', { x: e.x, y: e.y });
-    }
-    if (opts.shock && this.rng.chance(opts.shock)) {
-      e.shocked = Math.max(e.shocked, 1.1);
-      e.stun = Math.max(e.stun, 0.35);
-    }
+    if (opts.freeze && this.rng.chance(opts.freeze)) e.frozen = Math.max(e.frozen, 1.6);
+    if (opts.shock && this.rng.chance(opts.shock)) e.stun = Math.max(e.stun, 0.5);
 
     if (!opts.silent) {
-      this.sfx(opts.crit ? 'crit' : 'hit', { gain: opts.crit ? 1 : 0.7 });
-      if (opts.crit) {
-        this.hitStop = Math.max(this.hitStop, 0.045);
-        this.shake(3, 0.1);
-        runHook(this.player, 'onCrit', { game: this, player: this.player, enemy: e });
-      }
+      this.sfx(opts.crit ? 'crit' : 'hit', { x: e.x, y: e.y + e.height * 0.6, z: e.z, gain: opts.crit ? 1 : 0.7 });
+      if (opts.crit) runHook(this.player, 'onCrit', { game: this, player: this.player, enemy: e });
     }
-    this.events.emit('damage', { enemy: e, amount: dmg, crit: opts.crit });
     runHook(this.player, 'onHit', { game: this, player: this.player, enemy: e, amount: dmg });
 
     if (e.hp <= 0) this.killEnemy(e, opts);
@@ -901,29 +712,30 @@ export class Game {
 
   killEnemy(e, opts = {}) {
     if (!e.alive) return;
-
-    // Revenants get back up once instead of dying.
-    if (e.def && e.def.behavior === 'reviver' && !e.ai.revived && !e.ai.downed) {
-      e.ai.downed = true;
-      e.ai.reviveT = e.def.params.reviveAfter;
-      e.hp = 1;
-      return;
-    }
-
     e.alive = false;
-    e.dying = 0.35;
+    e.dying = e.dyingMax;
     e.hp = 0;
     this.stats.kills++;
 
     if (e.isBoss) {
-      this.sfx('bossDie');
-      this.shake(12, 0.7);
-      this.hitStop = 0.12;
-      this.fx('bossDeath', { x: e.x, y: e.y, color: e.tint });
-      e.dying = 1.2;
+      this.stats.bossesKilled++;
+      this.sfx('bossDie', { x: e.x, y: e.y + 1, z: e.z });
+      this.shake(2.2, 1.2, 1);
+      this.fx('bossDeath', { x: e.x, y: e.y + 1.5, z: e.z, color: e.tint });
+      this.dungeon.stairs.active = true;
+      this.bossActive = false;
+      this.objective = 'лестница открыта';
+      this.message('ПУТЬ ВНИЗ ОТКРЫТ', '', 3);
+      // Boss reward.
+      this.addProp({ type: 'pedestal', x: e.x + 2, z: e.z, itemId: this.pickItem('boss') });
+      for (let i = 0; i < 6; i++) {
+        this.dropPickup(e.x + this.rng.range(-2, 2), e.z + this.rng.range(-2, 2), 'shard');
+      }
+      this.dropPickup(e.x - 2, e.z, 'battery');
+      this.events.emit('bossDown', { floor: this.floorIndex });
     } else {
-      this.sfx('enemyDie');
-      this.fx('death', { x: e.x, y: e.y, color: e.tint, radius: e.radius });
+      if (!opts.silent) this.sfx('enemyDie', { x: e.x, y: e.y + 0.6, z: e.z });
+      this.fx('death', { x: e.x, y: e.y + e.height * 0.5, z: e.z, color: e.tint });
     }
 
     const d = e.def && e.def.onDeath;
@@ -931,405 +743,229 @@ export class Game {
       if (d.split) {
         for (let i = 0; i < d.split.count; i++) {
           const a = (i / d.split.count) * Math.PI * 2;
-          const spot = findFreeSpot(
-            this.room.tiles,
-            e.x + Math.cos(a) * 16,
-            e.y + Math.sin(a) * 16,
-            8,
-            this.rng,
-          );
-          const child = createEnemy(d.split.id, spot.x, spot.y, {
-            hpScale: d.split.hpScale,
-            fromSplit: true,
-            phase: this.rng.angle(),
-          });
+          const spot = findFreeSpot(this.dungeon.cells, e.x + Math.cos(a) * 1.2, e.z + Math.sin(a) * 1.2, 0.5, this.rng);
+          const child = createEnemy(d.split.id, spot.x, spot.z, { hpScale: d.split.hpScale, fromSpawn: true });
+          child.homeRoom = e.homeRoom;
+          child.ai.state = 'hunt';
           this.enemies.push(child);
         }
       }
-      if (d.explode) {
-        this.explode(e.x, e.y, d.explode.radius, d.explode.damage, TEAM.ENEMY, {});
-      }
-      if (d.goo) this.spawnGoo(e.x, e.y, d.goo);
       if (d.cloud) {
-        this.spawnCloud(e.x, e.y, {
-          radius: d.cloud.radius,
-          time: d.cloud.time,
-          damage: d.cloud.damage,
-          team: TEAM.ENEMY,
-          color: '#8ede4a',
-          kind: d.cloud.kind,
+        this.spawnPuddle(e.x, e.z, {
+          radius: d.cloud.radius, time: d.cloud.time, damage: d.cloud.damage, fire: d.cloud.fire, team: TEAM.ENEMY,
         });
       }
-      if (d.leaves || d.shards) {
-        this.spawnBurst(e.x, e.y, {
-          count: d.leaves || d.shards,
-          speed: 150,
-          damage: 1,
-          team: TEAM.ENEMY,
-          color: e.tint,
-          life: 0.7,
-        });
-      }
-    }
-
-    // Poison plague synergy: dying poisoned enemies leave a cloud.
-    if (e.poison > 0 && opts.shot && opts.shot.plague) {
-      this.spawnCloud(e.x, e.y, {
-        radius: 46,
-        time: 3,
-        damage: 2,
-        team: TEAM.PLAYER,
-        color: '#8ede4a',
-        kind: 'poison',
-      });
-    }
-    if (e.frozen > 0 && opts.shot && (opts.shot.shatter || opts.shot.frostbomb)) {
-      this.spawnBurst(e.x, e.y, {
-        count: 8,
-        speed: 230,
-        damage: 3 + this.player.stats.damage * 0.4,
-        team: TEAM.PLAYER,
-        color: '#9fe6ff',
-        life: 0.45,
-      });
     }
 
     runHook(this.player, 'onKill', { game: this, player: this.player, enemy: e });
 
-    // Drops
-    if (!e.fromSplit) {
+    if (!e.fromSpawn) {
       const luck = this.player.stats.luck;
-      const roll = this.rng.next();
-      const chance = (e.elite ? 0.55 : 0.16) + luck * 0.015;
-      if (roll < chance * e.dropChanceMul) {
-        const kinds = ['coin', 'coin', 'coin', 'halfHeart', 'bomb', 'key'];
-        this.dropPickup(e.x, e.y, this.rng.pick(kinds));
+      const chance = (e.elite ? 0.7 : 0.2) + luck * 0.02;
+      if (this.rng.chance(chance)) {
+        this.dropPickup(e.x, e.z, this.rng.pick(['shard', 'shard', 'shard', 'heal', 'battery']));
       }
     }
+
+    if (chargeActive(this.player, 1)) this.events.emit('activeReady', {});
+    this.stats.roomsCleared = this.enemies.filter((x) => !x.alive).length;
   }
 
-  damageEnemiesNear(x, y, radius, amount, source, stun = 0) {
+  damageEnemiesNear(x, z, radius, amount, source, stun = 0) {
     let any = false;
     for (const e of this.enemies) {
       if (!e.alive || e.invulnerable) continue;
-      const d = dist(e.x, e.y, x, y);
+      const d = dist2d(e.x, e.z, x, z);
       if (d > radius + e.radius) continue;
-      this.damageEnemy(e, amount, { source, knockback: 90, kx: e.x - x, ky: e.y - y, silent: true });
+      this.damageEnemy(e, amount, {
+        source, silent: true, knockback: 4, kx: e.x - x, kz: e.z - z,
+      });
       if (stun) e.stun = Math.max(e.stun, stun);
       any = true;
     }
-    if (any) this.sfx('hit', { gain: 0.5 });
+    if (any) this.sfx('hit', { x, y: 1, z, gain: 0.6 });
     return any;
   }
 
-  damageAllEnemies(amount) {
+  pullEnemiesToward(x, z, radius, force) {
     for (const e of this.enemies) {
-      if (e.alive) this.damageEnemy(e, amount, { source: 'nuke', silent: true });
-    }
-    this.sfx('explode', { gain: 0.6 });
-  }
-
-  pullEnemiesToward(x, y, radius, force) {
-    for (const e of this.enemies) {
-      if (!e.alive || e.knockbackResist >= 1) continue;
+      if (!e.alive || e.isBoss) continue;
       const dx = x - e.x;
-      const dy = y - e.y;
-      const d = Math.hypot(dx, dy);
-      if (d > radius || d < 1) continue;
+      const dz = z - e.z;
+      const d = Math.hypot(dx, dz);
+      if (d > radius || d < 0.1) continue;
       e.x += (dx / d) * force * (1 - d / radius);
-      e.y += (dy / d) * force * (1 - d / radius);
+      e.z += (dz / d) * force * (1 - d / radius);
     }
   }
 
-  explode(x, y, radius, damage, team, opts = {}) {
-    this.fx('explosion', { x, y, radius, color: opts.napalm ? '#ff7a2f' : '#ffd166' });
-    this.sfx('explode');
-    this.shake(7, 0.28);
+  explode(x, y, z, radius, damage, team, opts = {}) {
+    this.fx('explosion', { x, y, z, radius, color: opts.color });
+    this.sfx('explode', { x, y, z });
+    this.shake(1.0, 0.3);
     if (team === TEAM.PLAYER) {
-      this.damageEnemiesNear(x, y, radius, damage, 'explosion');
+      this.damageEnemiesNear(x, z, radius, damage, 'explosion', opts.stun || 0);
     } else if (!this.player.dead) {
-      if (dist(this.player.x, this.player.y, x, y) < radius) {
-        this.damagePlayer(Math.max(1, Math.round(damage / 3)), { source: 'explosion' });
+      const p = this.player;
+      if (dist2d(p.x, p.z, x, z) < radius + p.radius) {
+        this.damagePlayer(Math.max(1, Math.round(damage * 0.7)), { source: 'explosion' });
       }
     }
-    if (opts.rocks !== false) this.smashRocksNear(x, y, radius);
     if (opts.napalm) {
-      this.spawnGoo(x, y, { radius: radius * 0.7, time: 4, damage: 1, kind: 'fire' });
+      this.spawnPuddle(x, z, { radius: radius * 0.8, time: 4, damage: 2, fire: true, team });
     }
-    runHook(this.player, 'onBomb', { game: this, player: this.player, x, y });
+    this.alertNearby(x, z, 20);
   }
 
-  placeBomb(x, y) {
-    this.effects.push({
-      type: 'bomb',
-      x,
-      y,
-      t: 0,
-      fuseT: 1.4,
-      lastBeep: -1,
-      damage: 22 + this.player.stats.damage * 2,
-    });
-    this.sfx('pickup', { rate: 0.6, gain: 0.5 });
-  }
-
-  spawnShockwave(x, y, o) {
-    this.effects.push({
-      type: 'shockwave',
-      x,
-      y,
-      t: 0,
-      r: 0,
-      radius: o.radius,
-      damage: o.damage,
-      team: o.team,
-      color: o.color || '#ffffff',
-      stun: o.stun || 0,
-      done: false,
-    });
-    this.fx('ring', { x, y, radius: o.radius, color: o.color || '#ffffff' });
-  }
-
-  spawnGoo(x, y, o) {
-    this.effects.push({
-      type: 'goo',
-      x,
-      y,
-      t: 0,
-      time: o.time || 3,
-      radius: o.radius || 16,
-      damage: o.damage || 0,
-      kind: o.kind || 'goo',
-      color: o.color || (o.kind === 'lava' || o.kind === 'fire' ? '#ff7a2f' : '#8ede4a'),
-    });
-  }
-
-  spawnCloud(x, y, o) {
-    this.effects.push({
-      type: 'cloud',
-      x,
-      y,
-      t: 0,
-      time: o.time || 3,
-      radius: o.radius || 40,
-      damage: o.damage || 1,
-      team: o.team,
-      color: o.color || '#8ede4a',
-      kind: o.kind || 'poison',
-    });
-  }
-
-  spawnBurst(x, y, o) {
-    for (let i = 0; i < o.count; i++) {
-      const s = this.spawnShot(o.team);
+  spawnBurst(x, y, z, count, o = {}) {
+    for (let i = 0; i < count; i++) {
+      const s = this.spawnShot(o.team == null ? TEAM.PLAYER : o.team);
       if (!s) return;
-      const a = (i / o.count) * Math.PI * 2 + this.rng.range(-0.2, 0.2);
+      const a = (i / count) * Math.PI * 2;
       s.x = s.px = x;
       s.y = s.py = y;
-      s.angle = a;
-      s.speed = o.speed;
-      s.vx = Math.cos(a) * o.speed;
-      s.vy = Math.sin(a) * o.speed;
-      s.damage = o.damage;
-      s.radius = 3.4;
-      s.life = s.maxLife = o.life || 0.5;
-      s.color = o.color;
+      s.z = s.pz = z;
+      s.speed = o.speed || 18;
+      s.vx = Math.cos(a) * s.speed;
+      s.vy = 0;
+      s.vz = Math.sin(a) * s.speed;
+      s.damage = o.damage || 3;
+      s.radius = 0.14;
+      s.size = 0.3;
+      s.life = s.maxLife = 0.45;
       s.freeze = o.freeze || 0;
-      s.style = 'shard';
+      s.burn = o.burn || 0;
+      s.r = o.r == null ? 1 : o.r;
+      s.g = o.g == null ? 1 : o.g;
+      s.b = o.b == null ? 1 : o.b;
+      s.sprite = SPRITE.SHARD;
     }
   }
 
-  spawnStarfall(count, damage) {
-    for (let i = 0; i < count; i++) {
-      this.effects.push({
-        type: 'starfall',
-        x: this.rng.range(TILE, ROOM_PX_W - TILE),
-        y: this.rng.range(TILE, ROOM_PX_H - TILE),
-        t: 0,
-        delay: 0.25 + i * 0.11,
-        damage,
-        done: false,
-      });
-    }
-    this.sfx('shootLaser', { gain: 0.4 });
-  }
-
-  firePlayerLaser(angle, charge) {
-    const dmg = this.player.stats.damage * this.player.stats.damageMult * (1.2 + charge * 2.2);
-    const prism = this.player.inv.synergies.some((s) => s.id === 'prismBeam');
-    const angles = prism ? [angle - 0.18, angle, angle + 0.18] : [angle];
-    for (const a of angles) {
-      this.beamDamage(this.player.x, this.player.y, a, 620, dmg, TEAM.PLAYER, 1, true);
-      this.effects.push({
-        type: 'beam',
-        x: this.player.x,
-        y: this.player.y,
-        angle: a,
-        len: 620,
-        t: 0,
-        time: 0.22,
-        color: prism ? ['#ff4fa3', '#4fe1ff', '#ffe14f'][angles.indexOf(a)] : '#ff2e63',
-        width: 7 + charge * 6,
-      });
-    }
-    this.sfx('shootLaser');
-    this.shake(4, 0.16);
-  }
-
-  /**
-   * Damage everything along a ray. `instant` applies full damage once;
-   * otherwise `amount` is treated as damage-per-second.
-   */
-  beamDamage(x, y, angle, len, amount, team, dt, instant = false) {
-    const dx = Math.cos(angle);
-    const dy = Math.sin(angle);
-    const steps = Math.ceil(len / 10);
-    let hitAny = false;
-    for (let i = 1; i <= steps; i++) {
-      const px = x + dx * i * 10;
-      const py = y + dy * i * 10;
-      const tile = tileAtWorld(this.room.tiles, px, py);
-      if (tile === T.WALL || tile === T.ROCK) {
-        if (tile === T.ROCK && team === TEAM.PLAYER) this.damageRock(px, py, 99);
-        break;
-      }
-      if (team === TEAM.PLAYER) {
-        for (const e of this.enemies) {
-          if (!e.alive || e.invulnerable) continue;
-          if (dist(e.x, e.y, px, py) < e.radius + 6) {
-            if (instant) {
-              if (!e._beamHit) {
-                e._beamHit = true;
-                this.damageEnemy(e, amount, { source: 'beam', knockback: 40, kx: dx, ky: dy });
-                hitAny = true;
-              }
-            } else {
-              this.damageEnemy(e, amount * dt, { source: 'beam', silent: true });
-            }
-          }
-        }
-      } else if (!this.player.dead && this.player.invuln <= 0) {
-        if (dist(this.player.x, this.player.y, px, py) < this.player.radius + 5) {
-          this.damagePlayer(instant ? amount : Math.max(1, amount), { source: 'beam' });
-          break;
-        }
-      }
-    }
-    if (instant) for (const e of this.enemies) e._beamHit = false;
-    return hitAny;
-  }
-
-  damageRock(x, y, amount) {
-    const tx = Math.floor(x / TILE);
-    const ty = Math.floor(y / TILE);
-    if (tx <= 0 || ty <= 0 || tx >= ROOM_W - 1 || ty >= ROOM_H - 1) return;
-    const i = ty * ROOM_W + tx;
-    if (this.room.tiles[i] !== T.ROCK) return;
-    if (!this.room.rockHp) this.room.rockHp = new Uint8Array(ROOM_W * ROOM_H).fill(2);
-    this.room.rockHp[i] = Math.max(0, this.room.rockHp[i] - amount);
-    if (this.room.rockHp[i] <= 0) {
-      this.room.tiles[i] = T.FLOOR;
-      this.sfx('rockBreak');
-      this.fx('rubble', { x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE });
-      this.events.emit('tilesChanged', { room: this.room });
-      if (this.rng.chance(0.16)) this.dropPickup((tx + 0.5) * TILE, (ty + 0.5) * TILE, 'coin');
-    } else {
-      this.fx('spark', { x, y, color: '#c0a080' });
-    }
-  }
-
-  smashRocksNear(x, y, radius) {
-    const r = Math.ceil(radius / TILE);
-    const cx = Math.floor(x / TILE);
-    const cy = Math.floor(y / TILE);
-    for (let ty = cy - r; ty <= cy + r; ty++) {
-      for (let tx = cx - r; tx <= cx + r; tx++) {
-        if (tx <= 0 || ty <= 0 || tx >= ROOM_W - 1 || ty >= ROOM_H - 1) continue;
-        const i = ty * ROOM_W + tx;
-        if (this.room.tiles[i] !== T.ROCK) continue;
-        if (dist((tx + 0.5) * TILE, (ty + 0.5) * TILE, x, y) > radius) continue;
-        this.room.tiles[i] = T.FLOOR;
-        this.fx('rubble', { x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE });
-      }
-    }
-    this.events.emit('tilesChanged', { room: this.room });
-  }
-
-  smashAllRocks() {
-    for (let i = 0; i < this.room.tiles.length; i++) {
-      if (this.room.tiles[i] === T.ROCK) {
-        this.room.tiles[i] = T.FLOOR;
-        this.fx('rubble', { x: ((i % ROOM_W) + 0.5) * TILE, y: (Math.floor(i / ROOM_W) + 0.5) * TILE });
-      }
-    }
-    this.sfx('rockBreak');
-    this.events.emit('tilesChanged', { room: this.room });
-  }
-
-  clearEnemyShots(convert = false) {
-    this.shots.forEach((s) => {
-      if (s.team === TEAM.ENEMY) {
-        if (convert) this.fx('spark', { x: s.x, y: s.y, color: '#ffd166' });
-        this.shots.release(s);
-      }
+  spawnPuddle(x, z, o) {
+    this.areas.push({
+      x, z,
+      radius: o.radius || 2,
+      time: o.time || 4,
+      damage: o.damage || 1,
+      fire: !!o.fire,
+      team: o.team == null ? TEAM.ENEMY : o.team,
+      color: o.fire ? [1, 0.5, 0.15] : [0.6, 1, 0.3],
+      t: 0,
+      tick: 0,
     });
   }
 
-  // --------------------------------------------------------------- player
-
-  enemyTouchPlayer(e, dt) {
-    const p = this.player;
-    if (p.dead || p.invuln > 0 || e.disguised || e.hidden) return;
-    if (p.dashT > 0 && p.flags.phaseDash) return;
-    const rr = p.radius + e.radius - 2;
-    if (dist(p.x, p.y, e.x, e.y) > rr) return;
-    this.damagePlayer(e.touch, { source: 'contact', enemy: e });
-    runHook(p, 'onContact', { game: this, player: p, enemy: e });
-    // Push apart so contact damage cannot machine-gun.
-    const a = Math.atan2(p.y - e.y, p.x - e.x);
-    p.x += Math.cos(a) * 10;
-    p.y += Math.sin(a) * 10;
+  breakRubble(x, z) {
+    const gx = this.gridX(x);
+    const gy = this.gridZ(z);
+    if (gx <= 0 || gy <= 0 || gx >= GRID_W - 1 || gy >= GRID_H - 1) return;
+    const i = gy * GRID_W + gx;
+    if (this.dungeon.cells[i] !== C.RUBBLE) return;
+    this.dungeon.cells[i] = C.FLOOR;
+    this.sfx('rubble', { x, y: 1, z });
+    this.fx('rubble', { x: (gx + 0.5) * CELL, y: 1, z: (gy + 0.5) * CELL });
+    this.events.emit('levelChanged', {});
+    if (this.rng.chance(0.25)) this.dropPickup((gx + 0.5) * CELL, (gy + 0.5) * CELL, 'shard');
   }
+
+  /** Wake every monster within radius — explosions and screams carry. */
+  alertNearby(x, z, radius) {
+    for (const e of this.enemies) {
+      if (!e.alive || e.isBoss) continue;
+      if (dist2dSq(e.x, e.z, x, z) > radius * radius) continue;
+      e.aggro = 1;
+      e.ai.state = 'hunt';
+      e.ai.loseT = 6;
+      e.ai.lastSeenX = x;
+      e.ai.lastSeenZ = z;
+    }
+  }
+
+  claimPackToken(e) {
+    if (this.packToken.holder && this.packToken.holder !== e) return false;
+    this.packToken.holder = e;
+    this.packToken.t = 0.7;
+    return true;
+  }
+
+  spawnMinions(source, cfg) {
+    const max = cfg.max || 8;
+    const current = this.enemies.filter((e) => e.alive && e.id === cfg.id).length;
+    const n = Math.min(cfg.count || 1, Math.max(0, max - current));
+    for (let i = 0; i < n; i++) {
+      const a = this.rng.angle();
+      const spot = findFreeSpot(
+        this.dungeon.cells,
+        source.x + Math.cos(a) * 2,
+        source.z + Math.sin(a) * 2,
+        0.5,
+        this.rng,
+      );
+      const e = createEnemy(cfg.id, spot.x, spot.z, { hpScale: 0.85, fromSpawn: true });
+      e.homeRoom = source.homeRoom;
+      e.ai.state = 'hunt';
+      e.aggro = 1;
+      this.enemies.push(e);
+      this.fx('spawn', { x: spot.x, y: 0.8, z: spot.z, color: e.tint });
+    }
+  }
+
+  spawnDecoy(time) {
+    const p = this.player;
+    this.alertNearby(p.x + Math.sin(p.yaw) * 6, p.z + Math.cos(p.yaw) * 6, 25);
+    this.fx('spawn', { x: p.x + Math.sin(p.yaw) * 6, y: 0.8, z: p.z + Math.cos(p.yaw) * 6, color: [1, 0.9, 0.4] });
+  }
+
+  blinkPlayer(distance) {
+    const p = this.player;
+    const dir = aimDirection(p);
+    const hit = raycast(this.dungeon.cells, p.x, p.z, dir.x, dir.z, distance, {});
+    const d = Math.max(0, (hit.hit ? hit.dist : distance) - 0.6);
+    if (d < 1) return false;
+    p.x += dir.x * d;
+    p.z += dir.z * d;
+    p.px = p.x;
+    p.pz = p.z;
+    this.fx('teleport', { x: p.x, y: p.y + 1, z: p.z, color: [0.7, 0.6, 1] });
+    this.sfx('teleport');
+    return true;
+  }
+
+  // -------------------------------------------------------------- player
 
   damagePlayer(amount, opts = {}) {
     const p = this.player;
     if (p.dead) return 0;
     if (!opts.ignoreInvuln && p.invuln > 0) return 0;
 
-    if (p.flags.wardPerRoom && !p.wardUsed && !opts.ignoreArmor) {
+    if (p.flags.wardPerRoom && !p.wardUsed) {
       p.wardUsed = true;
-      p.invuln = p.stats.contactIFrames;
+      p.invuln = 0.9;
       this.sfx('block');
-      this.fx('ward', { x: p.x, y: p.y });
       return 0;
     }
 
     let dmg = Math.max(1, Math.round(amount));
-    if (!opts.ignoreArmor && p.stats.armor > 0) {
-      dmg = Math.max(1, dmg - Math.floor(p.stats.armor / 2));
-    }
+    if (p.stats.armor > 0) dmg = Math.max(1, dmg - Math.floor(p.stats.armor / 2));
     if (p.flags.glass) dmg = 99;
 
     if (p.shield > 0) {
       const absorbed = Math.min(p.shield, dmg);
       p.shield -= absorbed;
       dmg -= absorbed;
-      this.fx('shieldBreak', { x: p.x, y: p.y });
     }
-
     if (dmg > 0) {
       p.hp -= dmg;
       this.stats.damageTaken += dmg;
     }
-    p.invuln = p.stats.contactIFrames;
-    p.hurtFlash = 0.35;
+    p.invuln = 0.75;
+    p.hurtFlash = 1;
     p.statsDirty = true;
     this.sfx('hurt');
-    this.shake(6, 0.3);
-    this.hitStop = Math.max(this.hitStop, 0.06);
-    this.fx('playerHurt', { x: p.x, y: p.y });
+    this.shake(1.1, 0.35, 0.4);
     runHook(p, 'onHurt', { game: this, player: p, amount: dmg, source: opts.source });
     this.events.emit('playerHurt', { amount: dmg, hp: p.hp });
-
     if (p.hp <= 0) this.killPlayer();
     return dmg;
   }
@@ -1340,7 +976,10 @@ export class Game {
     p.hp = Math.min(p.stats.maxHp, p.hp + amount);
     p.statsDirty = true;
     const healed = p.hp - before;
-    if (healed > 0) this.fx('heal', { x: p.x, y: p.y });
+    if (healed > 0) {
+      this.fx('heal', { x: p.x, y: p.y + 1, z: p.z });
+      this.sfx('heal');
+    }
     return healed;
   }
 
@@ -1348,127 +987,76 @@ export class Game {
     const p = this.player;
     if (p.flags.revive && !p.reviveUsed) {
       p.reviveUsed = true;
-      p.hp = 2;
-      p.invuln = 2.4;
-      this.clearEnemyShots();
-      this.fx('revive', { x: p.x, y: p.y, color: '#fff3b0' });
+      p.hp = Math.max(2, Math.round(p.stats.maxHp * 0.4));
+      p.invuln = 3;
+      this.shots.clear();
+      this.fx('heal', { x: p.x, y: p.y + 1, z: p.z });
       this.sfx('synergy');
-      this.message('Последняя свеча вспыхнула', '', 2);
+      this.message('ПОСЛЕДНИЙ СВЕТ ВСПЫХНУЛ', '', 2.4);
       return;
     }
     p.dead = true;
     p.hp = 0;
     this.state = STATE.DEAD;
     this.sfx('death');
-    this.shake(10, 0.6);
+    this.shake(2, 1);
     this.events.emit('death', { stats: this.stats });
   }
 
-  // --------------------------------------------------------------- allies
+  // ------------------------------------------------------------- pickups
 
-  spawnAlly(time) {
-    this.allies.push({
-      x: this.player.x + this.rng.range(-20, 20),
-      y: this.player.y + this.rng.range(-20, 20),
-      px: 0,
-      py: 0,
-      t: 0,
-      life: time,
-      cd: 0.4,
-      a: this.rng.angle(),
+  dropPickup(x, z, kind) {
+    const spot = findFreeSpot(this.dungeon.cells, x, z, 0.3, this.rng);
+    return this.addProp({ type: 'pickup', kind, x: spot.x, z: spot.z });
+  }
+
+  collectPickup(prop) {
+    const p = this.player;
+    switch (prop.kind) {
+      case 'shard':
+        p.coins += 1;
+        this.sfx('coin');
+        break;
+      case 'heal':
+        this.healPlayer(3);
+        break;
+      case 'battery':
+        this.torch.charge = Math.min(1, this.torch.charge + 0.45);
+        this.sfx('reloadTorch');
+        break;
+      default:
+        this.sfx('pickup');
+    }
+    this.fx('pickup', { x: prop.x, y: prop.y, z: prop.z, color: [1, 0.9, 0.5] });
+  }
+
+  pickItem(pool) {
+    const candidates = ITEM_IDS.filter(
+      (id) => ITEMS[id].pools.includes(pool) && !this.seenItems.has(id) && !hasItem(this.player.inv, id),
+    );
+    const list = candidates.length ? candidates : ITEM_IDS.filter((id) => ITEMS[id].pools.includes(pool));
+    if (!list.length) return ITEM_IDS[0];
+    const luck = this.player.stats ? this.player.stats.luck : 0;
+    const id = this.rng.weighted(list, (i) => {
+      const q = ITEMS[i].quality || 1;
+      return Math.max(0.2, 1 + (q - 2) * (0.2 + luck * 0.05));
     });
+    this.seenItems.add(id);
+    return id;
   }
 
-  updateAllies(dt) {
-    for (let i = this.allies.length - 1; i >= 0; i--) {
-      const a = this.allies[i];
-      a.px = a.x;
-      a.py = a.y;
-      a.life -= dt;
-      a.t += dt;
-      if (a.life <= 0) {
-        this.allies.splice(i, 1);
-        continue;
-      }
-      const target = this.nearestEnemy(a.x, a.y, 300);
-      if (target) {
-        const ang = Math.atan2(target.y - a.y, target.x - a.x);
-        a.x += Math.cos(ang) * 90 * dt;
-        a.y += Math.sin(ang) * 90 * dt;
-        a.cd -= dt;
-        if (a.cd <= 0) {
-          a.cd = 0.55;
-          const s = this.spawnShot(TEAM.PLAYER);
-          if (s) {
-            s.x = s.px = a.x;
-            s.y = s.py = a.y;
-            s.angle = ang;
-            s.speed = 260;
-            s.vx = Math.cos(ang) * 260;
-            s.vy = Math.sin(ang) * 260;
-            s.damage = 3 + this.player.stats.damage * 0.4;
-            s.radius = 3.5;
-            s.life = s.maxLife = 0.7;
-            s.color = '#7cff6b';
-          }
-        }
-      } else {
-        const ang = Math.atan2(this.player.y - a.y, this.player.x - a.x);
-        const d = dist(a.x, a.y, this.player.x, this.player.y);
-        if (d > 40) {
-          a.x += Math.cos(ang) * 100 * dt;
-          a.y += Math.sin(ang) * 100 * dt;
-        }
-      }
+  grantItem(id) {
+    const news = addItem(this, this.player, id);
+    this.stats.itemsTaken++;
+    this.sfx('item');
+    const item = ITEMS[id];
+    this.message(item.name, item.desc, 3.4);
+    if (news.length) {
+      this.sfx('synergy');
+      for (const s of news) this.message(`★ ${s.name}`, s.desc, 4);
+      this.events.emit('synergy', { synergies: news });
     }
-  }
-
-  spawnFamiliarShot(fam, angle, damage) {
-    const s = this.spawnShot(TEAM.PLAYER);
-    if (!s) return;
-    s.x = s.px = fam.x;
-    s.y = s.py = fam.y;
-    s.angle = angle;
-    s.speed = 300;
-    s.vx = Math.cos(angle) * 300;
-    s.vy = Math.sin(angle) * 300;
-    s.damage = damage;
-    s.radius = 3.2;
-    s.life = s.maxLife = 0.65;
-    s.color = '#7cff6b';
-    s.style = 'familiar';
-  }
-
-  spawnMinions(source, cfg) {
-    const max = cfg.max || 8;
-    const current = this.enemies.filter((e) => e.alive && e.id === cfg.id).length;
-    const room = Math.max(0, max - current);
-    const n = Math.min(cfg.count || 1, room);
-    for (let i = 0; i < n; i++) {
-      const a = this.rng.angle();
-      const spot = findFreeSpot(
-        this.room.tiles,
-        source.x + Math.cos(a) * 24,
-        source.y + Math.sin(a) * 24,
-        8,
-        this.rng,
-      );
-      const e = createEnemy(cfg.id, spot.x, spot.y, {
-        hpScale: 0.85,
-        fromSplit: true,
-        phase: this.rng.angle(),
-      });
-      this.enemies.push(e);
-      this.fx('summon', { x: spot.x, y: spot.y, color: e.tint });
-    }
-  }
-
-  /** Pack hunters take turns; only one may be dashing at a time. */
-  claimPackToken(e) {
-    if (this.packToken.holder && this.packToken.holder !== e) return false;
-    this.packToken.holder = e;
-    this.packToken.t = 0.6;
-    return true;
+    this.events.emit('itemGet', { id, item, synergies: news });
   }
 
   // ---------------------------------------------------------------- misc
@@ -1481,36 +1069,26 @@ export class Game {
     this.events.emit('sfx', { name, opts });
   }
 
-  shake(mag, time) {
+  shake(mag, time, glitch = 0) {
     if (mag > this.shakeMag || this.shakeT <= 0) {
       this.shakeMag = mag;
       this.shakeT = time;
     }
+    if (glitch) this.events.emit('shake', { glitch });
   }
 
-  message(title, sub, time = 2) {
-    this.messages.push({ title, sub, time, t: 0 });
+  message(title, sub, time = 2.5) {
+    this.messages.push({ title, sub: sub || '', time, t: 0 });
     if (this.messages.length > 3) this.messages.shift();
   }
 
   togglePause() {
     if (this.state === STATE.PLAYING) {
       this.state = STATE.PAUSED;
-      this.prevState = STATE.PLAYING;
       this.events.emit('pause', {});
     } else if (this.state === STATE.PAUSED) {
       this.state = STATE.PLAYING;
       this.events.emit('resume', {});
     }
-  }
-
-  /** Snapshot for the save system (handled entirely by the shell). */
-  serializeMeta() {
-    return {
-      seed: this.seed,
-      floor: this.floorIndex,
-      stats: this.stats,
-      items: this.player.inv.items.slice(),
-    };
   }
 }

@@ -1,14 +1,13 @@
 /**
- * Boss registry.
- *
- * Each floor names its boss in data/floors.js; this maps that id to a factory.
- * Adding a boss is: write the file, add one line here.
+ * Boss registry. Each floor names its boss in data/floors.js; this maps that id
+ * to a factory. Adding a boss is: write the file, add one line here.
  */
 import { createLeshy } from './leshy.js';
 import { createChiroptera } from './chiroptera.js';
 import { createBellowsmith } from './bellowsmith.js';
 import { createIgnarok } from './ignarok.js';
 import { createChromadrake } from './chromadrake.js';
+import { updateStatus } from '../entities/enemy.js';
 
 const FACTORIES = {
   leshy: createLeshy,
@@ -18,45 +17,28 @@ const FACTORIES = {
   chromadrake: createChromadrake,
 };
 
-export function createBoss(game, id, x, y) {
+export function createBoss(game, id, x, z) {
   const make = FACTORIES[id];
   if (!make) throw new Error(`Unknown boss id: ${id}`);
-  const boss = make(game, x, y);
-  // Late floors get a small health bump so a strong build still has a fight.
-  boss.maxHp = Math.round(boss.maxHp * (1 + (game.floorIndex - 1) * 0.05));
-  boss.hp = boss.maxHp;
+  const boss = make(game, x, z);
   return boss;
 }
 
-export function updateBoss(game, boss, dt) {
-  if (boss.flash > 0) boss.flash -= dt;
-  if (boss.burn > 0) {
-    boss.burn -= dt;
-    boss.burnAccum = (boss.burnAccum || 0) + boss.burnDps * dt;
-    if (boss.burnAccum >= 1) {
-      const n = Math.floor(boss.burnAccum);
-      boss.burnAccum -= n;
-      game.damageEnemy(boss, n, { source: 'burn', kind: 'fire', silent: true });
-    }
+export function updateBoss(game, b, dt) {
+  b.px = b.x;
+  b.pz = b.z;
+  updateStatus(game, b, dt);
+  if (!b.alive) return;
+  // Bosses shrug off crowd control: it slows them, never locks them.
+  if (b.frozen > 0) b.frozen -= dt * 3;
+  if (b.stun > 0) b.stun -= dt * 3;
+  const slow = b.frozen > 0 ? 0.65 : 1;
+  b.update(game, b, dt * slow);
+  if (b.light) {
+    b.light.x = b.x;
+    b.light.y = b.y + b.height * 0.5;
+    b.light.z = b.z;
   }
-  if (boss.poison > 0) {
-    boss.poison -= dt;
-    boss.poisonAccum = (boss.poisonAccum || 0) + boss.poisonDps * dt;
-    if (boss.poisonAccum >= 1) {
-      const n = Math.floor(boss.poisonAccum);
-      boss.poisonAccum -= n;
-      game.damageEnemy(boss, n, { source: 'poison', kind: 'poison', silent: true });
-    }
-  }
-  // Bosses shrug off freeze/stun quickly — they only slow, never lock.
-  if (boss.frozen > 0) boss.frozen -= dt * 3;
-  if (boss.stun > 0) boss.stun -= dt * 3;
-  if (boss.shocked > 0) boss.shocked -= dt;
-
-  boss.px = boss.x;
-  boss.py = boss.y;
-  const slow = boss.frozen > 0 ? 0.6 : 1;
-  boss.update(game, boss, dt * slow);
 }
 
 export { FACTORIES as BOSS_FACTORIES };

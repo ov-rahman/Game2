@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <meta name="color-scheme" content="dark">
-<title>Глубина — спуск в пять этажей</title>
+<title>ГЛУБИНА — спуск на пять этажей</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div id="stage">
-  <canvas id="game" width="640" height="384" tabindex="0" aria-label="Игровое поле"></canvas>
+  <canvas id="game" tabindex="0" aria-label="Игровое поле"></canvas>
   <div id="boot">
     <div class="boot-title">ГЛУБИНА</div>
-    <div class="boot-sub">рисуем спрайты…</div>
+    <div class="boot-sub">генерируем текстуры…</div>
   </div>
   <noscript><p class="fatal">Для игры нужен включённый JavaScript.</p></noscript>
 </div>
@@ -28,11 +28,11 @@
     splash.innerHTML =
       '<div class="boot-title">не удалось запустить</div>' +
       '<div class="boot-sub">' + message + '</div>' +
-      (detail ? '<pre class="boot-detail">' + String(detail).slice(0, 400) + '</pre>' : '');
+      (detail ? '<pre class="boot-detail">' + String(detail).slice(0, 600) + '</pre>' : '');
   }
 
-  // ES modules cannot be loaded over file:// — say so plainly instead of
-  // leaving a blank canvas. standalone.html works without a server.
+  // ES modules cannot load over file:// — browsers apply CORS to module
+  // scripts. standalone.html is the single-file build that works from disk.
   if (location.protocol === 'file:') {
     fail(
       'Браузер блокирует ES-модули на file://. Открой standalone.html ' +
@@ -43,7 +43,6 @@
       const app = boot(canvas);
       splash.classList.add('hidden');
       canvas.focus();
-      // Exposed for the headless smoke test; harmless in normal play.
       window.__DEEPSHADE__ = app;
     } catch (err) {
       fail('ошибка инициализации', err && err.stack ? err.stack : err);

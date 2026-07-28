@@ -1,9 +1,9 @@
 /**
  * Assembles the browser implementation of the Platform contract.
  *
- * This is the only file that knows both "we are in a browser" and "this is a
- * game". A Tauri/Electron build supplies its own equivalent of this file and
- * everything above it stays untouched.
+ * The only file that knows both "we are in a browser" and "this is a game".
+ * A Tauri/Electron build supplies its own equivalent and everything above it
+ * stays untouched.
  */
 import { assertPlatform } from '../interfaces.js';
 import { createBrowserInput } from './input-browser.js';
@@ -28,8 +28,8 @@ export function createBrowserPlatform(canvas, opts = {}) {
     timer,
     caps: {
       canFullscreen: typeof document.documentElement.requestFullscreen === 'function',
+      canPointerLock: typeof canvas.requestPointerLock === 'function',
       canQuit: false,
-      hasPointer: !window.matchMedia || !window.matchMedia('(pointer: coarse)').matches,
       persistentStorage: storage.persistent,
     },
     dispose() {

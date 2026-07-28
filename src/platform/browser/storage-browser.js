@@ -1,11 +1,11 @@
 /**
  * Browser storage adapter.
  *
- * Wraps localStorage with JSON handling and a memory fallback, so private-mode
- * browsers and file:// contexts that block storage still run the game. A Tauri
- * build swaps this for a file-backed implementation with the same three methods.
+ * localStorage with JSON handling and a memory fallback, so private-mode
+ * browsers and blocked file:// contexts still run. A Tauri build swaps this for
+ * a file-backed implementation exposing the same three methods.
  */
-const PREFIX = 'deepshade:';
+const PREFIX = 'deepshade3d:';
 
 export function createBrowserStorage(prefix = PREFIX) {
   const memory = new Map();
@@ -17,7 +17,7 @@ export function createBrowserStorage(prefix = PREFIX) {
     window.localStorage.removeItem(probe);
     backend = window.localStorage;
   } catch {
-    backend = null; // Storage disabled — fall back to memory for this session.
+    backend = null; // storage disabled — this session keeps saves in memory
   }
 
   return {
@@ -28,8 +28,7 @@ export function createBrowserStorage(prefix = PREFIX) {
       const k = prefix + key;
       try {
         const raw = backend ? backend.getItem(k) : memory.get(k);
-        if (raw == null) return null;
-        return JSON.parse(raw);
+        return raw == null ? null : JSON.parse(raw);
       } catch {
         return null;
       }

@@ -1,232 +1,195 @@
 /**
  * Floor 2 boss — Хироптера, the swarm mother.
  *
- * Fight identity: she is rarely where you last saw her. Phase 2 makes her
- * untouchable until the swarm she splits into is cleared, which turns the
- * fight into crowd control instead of damage racing.
+ * Fight identity: she is rarely where you last saw her, and phase 2 makes her
+ * untouchable until the swarm she hides behind is cleared — the fight becomes
+ * crowd control instead of a damage race.
  */
 import { TEAM } from '../constants.js';
-import { makeBoss, checkPhase, moveToward, aimAt, radial, fan, bullet, chooseAttack, ARENA } from './base.js';
-import { clamp } from '../math.js';
+import { makeBoss, checkPhase, toPlayer, moveToward, faceTarget, radial, bullet, chooseAttack, endAttack } from './base.js';
+import { SPRITE } from '../../data/sprite-ids.js';
 
-export function createChiroptera(game, x, y) {
+export function createChiroptera(game, x, z) {
   const b = makeBoss({
     id: 'chiroptera',
-    name: 'Хироптера',
+    name: 'ХИРОПТЕРА',
     title: 'мать стаи',
-    sprite: 'chiroptera',
-    x,
-    y,
-    radius: 24,
-    hp: 420,
-    speed: 96,
-    touch: 2,
+    art: 'chiroptera',
+    x, z,
+    radius: 1.4,
+    hp: 1150,
+    speed: 6.0,
+    touch: 3,
     flying: true,
     phaseThresholds: [0.66, 0.32],
     update,
     onPhase(g, boss, phase) {
       if (phase === 2) {
-        boss.mem.split = true;
+        boss.mem.shielded = true;
         boss.invulnerable = true;
-        boss.alpha = 0.45;
-        g.spawnMinions(boss, { id: 'bat', count: 6, max: 14 });
-        g.message('Стая закрывает её', 'убей летучих мышей', 2.2);
+        g.spawnMinions(boss, { id: 'batling', count: 8, max: 16 });
+        g.message('СТАЯ ЗАКРЫВАЕТ ЕЁ', 'убей нетопырей', 2.4);
       }
       if (phase === 3) {
-        boss.mem.split = false;
+        boss.mem.shielded = false;
         boss.invulnerable = false;
-        boss.alpha = 1;
       }
     },
   });
-  b.mem.hover = { x: ARENA.cx, y: ARENA.cy - 40 };
+  b.mem.hover = { x, z };
   return b;
 }
 
-const ATTACKS_P1 = ['sonic', 'swoop', 'summon'];
-const ATTACKS_P2 = ['sonic', 'summon', 'echoCross'];
-const ATTACKS_P3 = ['sonic', 'swoop', 'echoCross', 'screech'];
+const P1 = ['sonic', 'swoop', 'summon'];
+const P2 = ['sonic', 'summon', 'echoCross'];
+const P3 = ['sonic', 'swoop', 'echoCross', 'screech'];
 
 function update(game, b, dt) {
   b.t += dt;
-  b.wingPhase = b.t * 16;
+  b.bob = Math.sin(b.t * 3) * 0.2;
   checkPhase(game, b);
 
-  // Phase 2 shield drops only when her escorts are gone.
-  if (b.mem.split) {
-    const bats = game.enemies.filter((e) => e.alive && e.id === 'bat').length;
+  if (b.mem.shielded) {
+    const bats = game.enemies.filter((e) => e.alive && e.id === 'batling').length;
     if (bats === 0) {
-      b.mem.split = false;
+      b.mem.shielded = false;
       b.invulnerable = false;
-      b.alpha = 1;
       game.sfx('synergy');
-      game.message('Щит стаи разбит', '', 1.6);
+      game.message('ЩИТ СТАИ РАЗБИТ', '', 1.8);
     }
   }
 
+  const t = toPlayer(game, b);
   if (b.attack) {
     b.attackT += dt;
-    runAttack(game, b, dt);
+    runAttack(game, b, dt, t);
     return;
   }
 
   b.cd -= dt;
-  // Restless hovering: pick new perches constantly.
   b.mem.hoverT = (b.mem.hoverT || 0) - dt;
   if (b.mem.hoverT <= 0) {
-    b.mem.hoverT = game.rng.range(0.7, 1.4);
-    b.mem.hover = {
-      x: clamp(game.player.x + game.rng.range(-160, 160), ARENA.minX, ARENA.maxX),
-      y: clamp(game.player.y + game.rng.range(-120, 120), ARENA.minY, ARENA.maxY),
-    };
+    b.mem.hoverT = game.rng.range(0.8, 1.6);
+    const a = game.rng.angle();
+    const r = game.rng.range(6, 12);
+    b.mem.hover = { x: t.p.x + Math.cos(a) * r, z: t.p.z + Math.sin(a) * r };
   }
-  moveToward(b, b.mem.hover.x, b.mem.hover.y, b.speed, dt);
+  moveToward(game, b, b.mem.hover.x, b.mem.hover.z, b.speed, dt);
+  faceTarget(b, t, dt, 3);
 
-  if (b.cd <= 0) {
-    const list = b.phase === 1 ? ATTACKS_P1 : b.phase === 2 ? ATTACKS_P2 : ATTACKS_P3;
-    chooseAttack(game, b, list);
-  }
+  if (b.cd <= 0) chooseAttack(game, b, b.phase === 1 ? P1 : b.phase === 2 ? P2 : P3);
 }
 
-function runAttack(game, b, dt) {
+function runAttack(game, b, dt, t) {
   const T = b.attackT;
-  const p = game.player;
-
   switch (b.attack) {
-    // Expanding sonar rings with a safe gap that rotates.
+    // Sonar rings with a rotating safe gap.
     case 'sonic': {
-      b.mem.ringT = (b.mem.ringT || 0) - dt;
       if (T < 0.45) {
-        b.ai.telegraph = 1 - T / 0.45;
+        b.telegraph = 1 - T / 0.45;
         break;
       }
-      b.ai.telegraph = 0;
-      if (b.mem.ringT <= 0 && T < 2.4) {
-        b.mem.ringT = 0.6;
+      b.telegraph = 0;
+      b.mem.ringT = (b.mem.ringT || 0) - dt;
+      if (b.mem.ringT <= 0 && T < 2.6) {
+        b.mem.ringT = 0.7;
         const gap = game.rng.angle();
-        const n = 16;
+        const n = 18;
         for (let i = 0; i < n; i++) {
           const a = (i / n) * Math.PI * 2;
-          if (Math.abs(((a - gap + Math.PI * 3) % (Math.PI * 2)) - Math.PI) > Math.PI - 0.55) continue;
-          bullet(game, b, b.x, b.y, a, {
-            speed: 118,
-            damage: 1,
-            color: '#3ff0d0',
-            radius: 5,
-            style: 'sonic',
-          });
+          let d = a - gap;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          if (Math.abs(d) < 0.5) continue;
+          bullet(game, b, a, { speed: 10, damage: 2, color: [0.35, 1, 0.9] });
         }
-        game.sfx('enemyShoot', { gain: 0.7, rate: 0.8 });
+        game.sfx('enemyShoot', { x: b.x, y: b.y + 1, z: b.z, gain: 0.9, rate: 0.7 });
       }
-      if (T > 2.8) {
+      if (T > 3.0) {
         b.mem.ringT = 0;
-        endAttack(b, 0.9);
+        endAttack(b, 1.0);
       }
       break;
     }
 
-    // Three fast dives with a readable pause between them.
+    // Three fast dives with readable pauses.
     case 'swoop': {
-      if (!b.mem.swoops) b.mem.swoops = 0;
-      const cycle = 0.85;
+      b.mem.swoops = b.mem.swoops || 0;
+      const cycle = 0.95;
       const local = T - b.mem.swoops * cycle;
-      if (local < 0.3) {
-        b.ai.telegraph = 1 - local / 0.3;
-        b.mem.swoopA = aimAt(b, p);
-      } else if (local < 0.62) {
-        b.ai.telegraph = 0;
-        b.x += Math.cos(b.mem.swoopA) * 420 * dt;
-        b.y += Math.sin(b.mem.swoopA) * 420 * dt;
-        b.x = clamp(b.x, ARENA.minX, ARENA.maxX);
-        b.y = clamp(b.y, ARENA.minY, ARENA.maxY);
-        if (game.rng.chance(dt * 24)) game.fx('trail', { x: b.x, y: b.y, color: '#8f7bff' });
+      if (local < 0.35) {
+        b.telegraph = 1 - local / 0.35;
+        faceTarget(b, t, dt, 8);
+        b.mem.a = Math.atan2(t.dx, t.dz);
+      } else if (local < 0.7) {
+        b.telegraph = 0;
+        moveToward(game, b, b.x + Math.sin(b.mem.a) * 12, b.z + Math.cos(b.mem.a) * 12, 20, dt);
+        if (game.rng.chance(dt * 25)) game.fx('trail', { x: b.x, y: b.y + 0.4, z: b.z, color: [0.6, 0.5, 1] });
       } else {
         b.mem.swoops++;
         if (b.mem.swoops >= 3) {
           b.mem.swoops = 0;
-          endAttack(b, 1.0);
+          endAttack(b, 1.2);
         }
       }
       break;
     }
 
-    // Four crossing bullet lines that force diagonal movement.
+    // Crossing bouncing bolts that force diagonal movement.
     case 'echoCross': {
       b.mem.crossT = (b.mem.crossT || 0) - dt;
-      if (b.mem.crossT <= 0 && T < 2.6) {
-        b.mem.crossT = 0.42;
-        const off = b.t * 1.4;
-        radial(game, b, 4, {
-          offset: off,
-          speed: 150,
-          damage: 1,
-          color: '#8f7bff',
-          radius: 6,
-          bounce: 1,
-          style: 'echo',
-        });
+      if (b.mem.crossT <= 0 && T < 2.8) {
+        b.mem.crossT = 0.5;
+        radial(game, b, 4, { offset: b.t * 1.4, speed: 12, damage: 2, bounce: 2, color: [0.6, 0.5, 1] });
       }
-      moveToward(b, ARENA.cx, ARENA.cy, 60, dt);
-      if (T > 3.0) {
+      if (T > 3.2) {
         b.mem.crossT = 0;
-        endAttack(b, 0.9);
+        endAttack(b, 1.0);
       }
       break;
     }
 
-    // Phase 3 finisher: a sustained screech that sweeps the arena.
+    // Phase 3: a sustained screech sweeping the arena.
     case 'screech': {
       if (T < 0.9) {
-        b.ai.telegraph = 1 - T / 0.9;
-        b.mem.beamA = aimAt(b, p);
+        b.telegraph = 1 - T / 0.9;
+        faceTarget(b, t, dt, 6);
+        b.mem.a = Math.atan2(t.dx, t.dz) - 0.9;
         break;
       }
-      b.ai.telegraph = 0;
-      const sweep = b.mem.beamA + (T - 0.9) * 1.5 * (b.mem.sweepDir || 1);
-      game.beamDamage(b.x, b.y, sweep, 620, 2, TEAM.ENEMY, dt);
-      game.effects.push({
-        type: 'beam',
-        x: b.x,
-        y: b.y,
-        angle: sweep,
-        len: 620,
-        t: 0,
-        time: 0.08,
-        color: '#3ff0d0',
-        width: 9,
-      });
-      if (T > 2.4) {
-        b.mem.sweepDir = (b.mem.sweepDir || 1) * -1;
-        endAttack(b, 1.3);
+      b.telegraph = 0;
+      b.mem.beamT = (b.mem.beamT || 0) - dt;
+      const a = b.mem.a + (T - 0.9) * 1.4;
+      if (b.mem.beamT <= 0 && T < 3.0) {
+        b.mem.beamT = 0.05;
+        bullet(game, b, a, { speed: 22, damage: 2, life: 1.6, color: [0.35, 1, 0.9], radius: 0.3 });
+      }
+      if (T > 3.2) {
+        b.mem.beamT = 0;
+        game.sfx('screech', { x: b.x, y: b.y + 1, z: b.z });
+        endAttack(b, 1.5);
       }
       break;
     }
 
     case 'summon': {
       if (T < 0.6) {
-        b.ai.telegraph = 1 - T / 0.6;
+        b.telegraph = 1 - T / 0.6;
         break;
       }
       if (!b.mem.summoned) {
         b.mem.summoned = true;
-        game.spawnMinions(b, { id: 'bat', count: b.phase >= 2 ? 4 : 3, max: 12 });
-        game.sfx('spawn');
+        game.spawnMinions(b, { id: 'batling', count: 3 + b.phase, max: 14 });
+        game.sfx('spawn', { x: b.x, y: b.y + 1, z: b.z });
       }
-      if (T > 1.2) {
+      if (T > 1.3) {
         b.mem.summoned = false;
-        endAttack(b, 1.2);
+        endAttack(b, 1.4);
       }
       break;
     }
 
     default:
-      endAttack(b, 1);
+      endAttack(b, 1.2);
   }
-}
-
-function endAttack(b, cd) {
-  b.attack = null;
-  b.attackT = 0;
-  b.ai.telegraph = 0;
-  b.cd = cd;
 }
