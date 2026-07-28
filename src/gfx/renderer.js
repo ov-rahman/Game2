@@ -349,7 +349,7 @@ export class Renderer {
     this.uploadLights(w, cam);
     this.setTorch(w, cam, g);
     const dmg = g.damageFlash();
-    w.vec4('uTintFlash', 1.0, 0.15, 0.12, dmg * 0.35);
+    w.vec4('uTintFlash', 1.0, 0.15, 0.12, dmg * 0.16);
 
     // --- level ------------------------------------------------------------
     w.mat4('uModel', this.identity);
@@ -358,7 +358,7 @@ export class Renderer {
     this.levelMesh.draw();
 
     if (this.levelGlowMesh) {
-      w.vec3('uEmissive', 1.15, 1.05, 0.95);
+      w.vec3('uEmissive', 0.85, 0.78, 0.7);
       w.float('uEmissivePulse', 1);
       this.levelGlowMesh.draw();
       w.vec3('uEmissive', 0, 0, 0);
@@ -432,7 +432,7 @@ export class Renderer {
     const power = t.on ? t.charge * (0.75 + 0.25 * Math.sin(this.time * 21 * (1 - t.charge))) : 0;
     w.vec3('uFlashPos', cam.x, cam.y, cam.z);
     w.vec3('uFlashDir', dirX, dirY, dirZ);
-    w.vec4('uFlashParams', Math.cos(t.inner), Math.cos(t.outer), t.range * (0.55 + 0.45 * t.charge), 3.6 * power);
+    w.vec4('uFlashParams', Math.cos(t.inner), Math.cos(t.outer), t.range * (0.55 + 0.45 * t.charge), 3.0 * power);
     w.vec3('uFlashColor', t.color[0], t.color[1], t.color[2]);
   }
 
@@ -462,14 +462,14 @@ export class Renderer {
       w.vec4('uTintFlash', 1, 1, 1, flash * 0.75);
       if (mesh.solid) mesh.solid.draw();
       if (mesh.glow) {
-        w.vec3('uEmissive', 1.4, 1.35, 1.3);
+        w.vec3('uEmissive', 1.05, 1.0, 0.95);
         w.float('uEmissivePulse', 1);
         mesh.glow.draw();
         w.vec3('uEmissive', 0, 0, 0);
         w.float('uEmissivePulse', 0);
       }
     }
-    w.vec4('uTintFlash', 1, 0.15, 0.12, g.damageFlash() * 0.35);
+    w.vec4('uTintFlash', 1, 0.15, 0.12, g.damageFlash() * 0.16);
 
     // Props: pickups, pedestals, stairs.
     for (const p of g.props) {

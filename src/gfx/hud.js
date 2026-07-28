@@ -178,7 +178,7 @@ export class HudPainter {
     if (dmg > 0.01) {
       const grd = ctx.createRadialGradient(RENDER_W / 2, RENDER_H / 2, RENDER_H * 0.28, RENDER_W / 2, RENDER_H / 2, RENDER_H * 0.75);
       grd.addColorStop(0, 'rgba(180,20,20,0)');
-      grd.addColorStop(1, `rgba(180,20,20,${dmg * 0.75})`);
+      grd.addColorStop(1, `rgba(180,20,20,${dmg * 0.5})`);
       ctx.fillStyle = grd;
       ctx.fillRect(0, 0, RENDER_W, RENDER_H);
     }

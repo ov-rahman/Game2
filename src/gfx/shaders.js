@@ -133,14 +133,17 @@ void main() {
     float spot = dot(-L, normalize(uFlashDir));
     float cone = smoothstep(uFlashParams.y, uFlashParams.x, spot);
     if (cone > 0.0) {
-      float atten = 1.0 - fd / uFlashParams.z;
-      atten *= atten;
+      float atten = pow(1.0 - fd / uFlashParams.z, 1.6);
       float ndl = max(dot(N, L), 0.0) * 0.8 + 0.2;
       lit += albedo * uFlashColor * (uFlashParams.w * cone * atten * ndl);
     }
   }
 
   lit += albedo * uEmissive * (1.0 + 0.25 * sin(uTime * 3.0 + vWorld.x + vWorld.z) * uEmissivePulse);
+
+  // Reinhard-style roll-off keeps bright surfaces (lava, torch at point-blank)
+  // inside the range the colour quantiser can still express.
+  lit = lit / (1.0 + lit * 0.55);
 
   float dist = length(uCamPos - vWorld);
   vec3 color = applyFog(lit, dist, uFogColor, uFogDensity);
@@ -290,7 +293,7 @@ void main() {
   color = mix(vec3(lum), color, uSaturation);
   color = (color - 0.5) * uContrast + 0.5 + uBrightness;
   color *= uTint;
-  color = mix(color, vec3(0.85, 0.12, 0.12), uDamage * 0.55);
+  color = mix(color, vec3(0.85, 0.12, 0.12), uDamage * 0.26);
 
   // --- scanlines and interference ----------------------------------------
   float scan = 1.0 - uScanline * (0.5 + 0.5 * sin(px.y * 3.14159));

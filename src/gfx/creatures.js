@@ -40,8 +40,9 @@ function eyes(ctx, y, spread, size, forward) {
   for (let i = 0; i < n; i++) {
     const t = n === 1 ? 0 : i / (n - 1) - 0.5;
     const x = t * spread;
-    const yy = n === 3 && i === 1 ? y + size * 1.6 : y;
-    glow.box(x, yy, forward, size, size, size * 0.6, uvGlow, art.glow);
+    const yy = n === 3 && i === 1 ? y + size * 1.8 : y;
+    // Rounded, so they read as eyes rather than as lit blocks.
+    glow.blob(x, yy, forward, size * 0.62, 4, uvGlow, art.glow, 1);
   }
 }
 
@@ -60,8 +61,9 @@ const FORMS = {
       const a = (i / 5) * Math.PI * 2;
       body.blob(Math.cos(a) * r * 0.7, r * 0.25, Math.sin(a) * r * 0.7, r * 0.26, 4, uv, art.dark, 0.9);
     }
-    eyes(ctx, r * 1.3, r * 0.8, 0.1, r * 0.72);
-    glow.blob(0, r * 0.8, 0, r * 0.35, 4, uvGlow, art.glow, 1);
+    eyes(ctx, r * 1.3, r * 0.8, 0.09, r * 0.72);
+    // Faint inner core, not a second light source.
+    glow.blob(0, r * 0.75, 0, r * 0.16, 4, uvGlow, art.dark, 1);
   },
 
   /** Four-legged runner. */

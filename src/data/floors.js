@@ -201,7 +201,7 @@ export const FLOORS = [
 
     rooms: { min: 12, max: 15 },
     roomSize: { min: 6, max: 13 },
-    hazardChance: 0.95,
+    hazardChance: 0.62,
     pits: false,
     wideCorridors: 0.4,
     special: { treasure: 1, shop: 1, challenge: 1 },

@@ -85,7 +85,7 @@ export function updatePlayer(game, p, dt, input) {
   const st = p.stats;
 
   if (p.invuln > 0) p.invuln -= dt;
-  if (p.hurtFlash > 0) p.hurtFlash -= dt;
+  if (p.hurtFlash > 0) p.hurtFlash -= dt * 2.6;
   if (p.recoil > 0) p.recoil = Math.max(0, p.recoil - dt * 6);
 
   // ---- look ------------------------------------------------------------
@@ -203,10 +203,12 @@ export function updatePlayer(game, p, dt, input) {
   // ---- hazards ---------------------------------------------------------
   const cell = cellAtWorld(game.dungeon.cells, p.x, p.z);
   if (cell === C.HAZARD && !p.flags.fireImmune) {
+    // Crossing two tiles of lava has to cost something without being lethal:
+    // one point every half second is a real decision, not an instant death.
     p.hazardAccum = (p.hazardAccum || 0) + dt;
-    if (p.hazardAccum > 0.45) {
+    if (p.hazardAccum > 0.5) {
       p.hazardAccum = 0;
-      game.damagePlayer(2, { source: 'hazard' });
+      game.damagePlayer(1, { source: 'hazard', ignoreInvuln: true });
     }
   } else {
     p.hazardAccum = 0;

@@ -172,6 +172,7 @@ export class Game {
     this.pendingStrikes.length = 0;
     this.shots.clear();
     this.exploredCells.clear();
+    this.messages.length = 0;
     this.bossActive = false;
 
     this.player.x = this.dungeon.start.x;
@@ -960,7 +961,7 @@ export class Game {
       this.stats.damageTaken += dmg;
     }
     p.invuln = 0.75;
-    p.hurtFlash = 1;
+    p.hurtFlash = 0.85;
     p.statsDirty = true;
     this.sfx('hurt');
     this.shake(1.1, 0.35, 0.4);
@@ -1079,7 +1080,7 @@ export class Game {
 
   message(title, sub, time = 2.5) {
     this.messages.push({ title, sub: sub || '', time, t: 0 });
-    if (this.messages.length > 3) this.messages.shift();
+    while (this.messages.length > 2) this.messages.shift();
   }
 
   togglePause() {
