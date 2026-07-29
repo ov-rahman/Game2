@@ -179,6 +179,46 @@ export class MeshBuilder {
     }
   }
 
+  /**
+   * Cylinder along +Z rather than +Y.
+   *
+   * `prism` builds upward, which is right for stalagmites and wrong for gun
+   * barrels — pointing one forward with `prism` gives a column standing on the
+   * player's hand, which is exactly what the first pass at the viewmodels did.
+   */
+  tubeZ(x, y, z, sides, rStart, rEnd, length, uv, color, roll = 0, ao = 1) {
+    const z1 = z + length;
+    for (let i = 0; i < sides; i++) {
+      const a0 = roll + (i / sides) * Math.PI * 2;
+      const a1 = roll + ((i + 1) / sides) * Math.PI * 2;
+      const c0 = Math.cos(a0);
+      const s0 = Math.sin(a0);
+      const c1 = Math.cos(a1);
+      const s1 = Math.sin(a1);
+      const A = [x + c0 * rStart, y + s0 * rStart, z];
+      const B = [x + c1 * rStart, y + s1 * rStart, z];
+      const Cc = [x + c1 * rEnd, y + s1 * rEnd, z1];
+      const D = [x + c0 * rEnd, y + s0 * rEnd, z1];
+      this.quadAuto(A, B, Cc, D, uv, color, [ao * 0.75, ao * 0.75, ao, ao]);
+    }
+    if (rEnd > 0.001) {
+      for (let i = 0; i < sides; i++) {
+        const a0 = roll + (i / sides) * Math.PI * 2;
+        const a1 = roll + ((i + 1) / sides) * Math.PI * 2;
+        this.quad(
+          [x + Math.cos(a0) * rEnd, y + Math.sin(a0) * rEnd, z1],
+          [x + Math.cos(a1) * rEnd, y + Math.sin(a1) * rEnd, z1],
+          [x, y, z1],
+          [x, y, z1],
+          [0, 0, 1],
+          uv,
+          color,
+          [ao, ao, ao, ao],
+        );
+      }
+    }
+  }
+
   /** Box rotated about Y and tilted about its long axis — wall shelves. */
   slab(x, y, z, sx, sy, sz, yaw, tilt, uv, color, ao = 1) {
     const cy = Math.cos(yaw);

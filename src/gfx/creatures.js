@@ -439,50 +439,156 @@ export { FORMS as CREATURE_FORMS };
 /**
  * The thing in your hands.
  *
- * Built from the weapon's `art` — barrel length, bulk and core colour — so
- * swapping weapons changes what you are looking at, not just the numbers
- * behind it. Same skeleton for all of them on purpose: it should read as the
- * same pair of hands holding a different tool.
+ * Six weapons, six silhouettes. At 428x240 through a dither, detail is wasted
+ * and outline is everything, so each one is built to be recognisable as a
+ * shape: the scattergun is wide and stubby, the lance is long and thin, the
+ * mortar is a fat tube. What they share is a pair of gloved hands and the
+ * glowing core, which is what makes them read as the same character's kit
+ * rather than as six unrelated props.
+ *
+ * Local space: +X right, +Y up, +Z forward (away from the eye). The grip sits
+ * near the origin because that is where the hand is.
  */
-export function buildWeaponMesh(art = {}) {
-  const body = new MeshBuilder(700);
-  const glow = new MeshBuilder(160);
+
+const GUN = {
+  steel: [0.55, 0.59, 0.66],
+  dark: [0.26, 0.28, 0.32],
+  brass: [0.72, 0.56, 0.3],
+  wood: [0.42, 0.29, 0.17],
+  glove: [0.3, 0.26, 0.24],
+  skin: [0.62, 0.45, 0.34],
+};
+
+/** Grip, trigger hand, and the forearm behind it. Every weapon gets these. */
+function gunHands(body, uv, gripZ, foreZ, foreY) {
+  // Rear grip and the hand around it.
+  body.slab(0, -0.105, gripZ, 0.05, 0.15, 0.062, 0, -0.22, uv, GUN.dark, 0.9);
+  body.box(0, -0.085, gripZ + 0.005, 0.075, 0.085, 0.085, uv, GUN.glove, 0.95);
+  body.box(0, -0.15, gripZ - 0.02, 0.07, 0.06, 0.07, uv, GUN.skin, 0.8);
+  // Support hand further up the weapon.
+  if (foreZ != null) {
+    body.box(0.002, foreY, foreZ, 0.078, 0.075, 0.1, uv, GUN.glove, 0.95);
+  }
+}
+
+/** Iron sights: a blade at the muzzle and a notch at the breech. */
+function gunSights(body, uv, frontZ, rearZ, y) {
+  body.box(0, y + 0.035, rearZ, 0.03, 0.026, 0.016, uv, GUN.dark, 0.9);
+  body.box(0, y + 0.04, frontZ, 0.012, 0.032, 0.014, uv, GUN.dark, 0.9);
+}
+
+const WEAPON_BUILDERS = {
+  /** Arclight: a lamp bolted to a rifle. Slim, honest, unremarkable. */
+  arclight(body, glow, uv, uvGlow, core) {
+    body.box(0, -0.012, 0.12, 0.062, 0.075, 0.24, uv, GUN.steel, 1);
+    body.box(0, -0.05, 0.02, 0.07, 0.05, 0.1, uv, GUN.wood, 0.95);
+    body.tubeZ(0, -0.03, 0.3, 8, 0.032, 0.028, 0.16, uv, GUN.steel, 0, 0.95);
+    // Lamp housing at the muzzle, with a lens.
+    body.tubeZ(0, -0.045, 0.44, 8, 0.055, 0.05, 0.09, uv, GUN.brass, 0, 1);
+    glow.tubeZ(0, -0.04, 0.52, 8, 0.042, 0.038, 0.012, uvGlow, core, 0, 1);
+    body.box(0, 0.03, 0.16, 0.026, 0.014, 0.2, uv, GUN.brass, 1);
+    gunSights(body, uv, 0.42, 0.05, 0.02);
+    gunHands(body, uv, -0.02, 0.26, -0.075);
+    glow.box(0, 0.005, 0.1, 0.022, 0.022, 0.09, uvGlow, core);
+  },
+
+  /** Scattergun: wide, short, two barrels and a drum under them. */
+  scattergun(body, glow, uv, uvGlow, core) {
+    body.box(0, -0.02, 0.1, 0.09, 0.085, 0.2, uv, GUN.steel, 1);
+    body.box(0, -0.055, 0.0, 0.085, 0.06, 0.11, uv, GUN.wood, 0.95);
+    // Twin barrels, side by side.
+    for (const sx of [-0.028, 0.028]) {
+      body.tubeZ(sx, -0.02, 0.2, 6, 0.032, 0.03, 0.2, uv, GUN.dark, 0, 0.95);
+      glow.tubeZ(sx, -0.018, 0.385, 6, 0.024, 0.02, 0.02, uvGlow, core, 0, 1);
+    }
+    // Drum magazine.
+    body.tubeZ(0, -0.11, 0.1, 8, 0.062, 0.058, 0.075, uv, GUN.brass, 0.2, 0.95);
+    body.box(0, 0.035, 0.14, 0.07, 0.018, 0.14, uv, GUN.dark, 1);
+    gunSights(body, uv, 0.36, 0.04, 0.03);
+    gunHands(body, uv, -0.03, 0.24, -0.08);
+    glow.box(0, 0.0, 0.08, 0.03, 0.026, 0.07, uvGlow, core);
+  },
+
+  /** Lance: one long barrel, a heat sink, and almost nothing else. */
+  lance(body, glow, uv, uvGlow, core) {
+    body.box(0, -0.01, 0.1, 0.055, 0.07, 0.24, uv, GUN.steel, 1);
+    body.box(0, -0.055, -0.01, 0.062, 0.055, 0.12, uv, GUN.dark, 0.95);
+    body.tubeZ(0, -0.022, 0.22, 6, 0.026, 0.02, 0.46, uv, GUN.steel, 0, 0.95);
+    // Heat-sink fins along the barrel.
+    for (let i = 0; i < 5; i++) {
+      body.box(0, -0.005, 0.26 + i * 0.075, 0.052, 0.03, 0.014, uv, GUN.brass, 1);
+    }
+    body.tubeZ(0, -0.03, 0.66, 8, 0.036, 0.03, 0.05, uv, GUN.dark, 0, 1);
+    glow.tubeZ(0, -0.028, 0.7, 8, 0.026, 0.006, 0.05, uvGlow, core, 0, 1);
+    gunSights(body, uv, 0.6, 0.03, 0.025);
+    gunHands(body, uv, -0.04, 0.34, -0.07);
+    glow.box(0, 0.012, 0.09, 0.018, 0.018, 0.12, uvGlow, core);
+  },
+
+  /** Cinder: small, fast, a canister of fuel on the side. */
+  cinder(body, glow, uv, uvGlow, core) {
+    body.box(0, -0.02, 0.08, 0.06, 0.08, 0.17, uv, GUN.dark, 1);
+    body.tubeZ(0, -0.02, 0.16, 6, 0.026, 0.024, 0.16, uv, GUN.steel, 0, 0.95);
+    // Fuel canister slung under the barrel.
+    body.tubeZ(0.045, -0.075, 0.1, 8, 0.032, 0.03, 0.16, uv, GUN.brass, 0.3, 0.95);
+    glow.tubeZ(0.045, -0.07, 0.25, 8, 0.024, 0.018, 0.02, uvGlow, core, 0, 1);
+    // Vent slots.
+    for (let i = 0; i < 4; i++) {
+      body.box(0, 0.02, 0.15 + i * 0.05, 0.05, 0.012, 0.02, uv, GUN.brass, 1);
+    }
+    body.tubeZ(0, -0.02, 0.31, 6, 0.03, 0.034, 0.04, uv, GUN.dark, 0, 1);
+    glow.tubeZ(0, -0.018, 0.34, 6, 0.026, 0.01, 0.03, uvGlow, core, 0, 1);
+    gunSights(body, uv, 0.28, 0.02, 0.03);
+    gunHands(body, uv, -0.02, 0.2, -0.07);
+    glow.box(0, 0.0, 0.06, 0.024, 0.024, 0.06, uvGlow, core);
+  },
+
+  /** Mortar: a fat tube on a shoulder brace. Nothing subtle about it. */
+  mortar(body, glow, uv, uvGlow, core) {
+    body.box(0, -0.02, 0.06, 0.085, 0.09, 0.16, uv, GUN.dark, 1);
+    body.tubeZ(0, -0.025, 0.14, 8, 0.058, 0.062, 0.26, uv, GUN.steel, 0, 0.95);
+    // Flared muzzle cup.
+    body.tubeZ(0, -0.03, 0.4, 8, 0.066, 0.082, 0.07, uv, GUN.brass, 0, 1);
+    glow.tubeZ(0, -0.028, 0.42, 8, 0.05, 0.06, 0.03, uvGlow, core, 0, 1);
+    // Shoulder brace behind the breech.
+    body.slab(0, -0.06, -0.06, 0.075, 0.1, 0.11, 0, 0.35, uv, GUN.wood, 0.9);
+    // Reinforcing bands.
+    for (let i = 0; i < 3; i++) {
+      body.tubeZ(0, -0.025, 0.18 + i * 0.08, 8, 0.068, 0.068, 0.018, uv, GUN.brass, 0, 1);
+    }
+    gunHands(body, uv, -0.01, 0.24, -0.095);
+    glow.box(0, 0.03, 0.06, 0.03, 0.026, 0.06, uvGlow, core);
+  },
+
+  /** Hymn: ornate, ringed, and clearly not built by the same hands. */
+  hymn(body, glow, uv, uvGlow, core) {
+    body.box(0, -0.015, 0.1, 0.058, 0.075, 0.22, uv, GUN.brass, 1);
+    body.box(0, -0.055, 0.0, 0.065, 0.055, 0.1, uv, GUN.wood, 0.95);
+    body.tubeZ(0, -0.02, 0.21, 6, 0.026, 0.022, 0.2, uv, GUN.steel, 0, 0.95);
+    // Halo rings around the barrel — the thing you actually recognise.
+    for (let i = 0; i < 3; i++) {
+      const z = 0.26 + i * 0.07;
+      const r = 0.062 - i * 0.008;
+      body.tubeZ(0, -0.02, z, 8, r, r, 0.012, uv, GUN.brass, i * 0.4, 1);
+      glow.tubeZ(0, -0.019, z + 0.002, 8, r * 0.72, r * 0.72, 0.008, uvGlow, core, i * 0.4, 1);
+    }
+    body.tubeZ(0, -0.025, 0.43, 8, 0.034, 0.026, 0.045, uv, GUN.brass, 0, 1);
+    glow.tubeZ(0, -0.022, 0.46, 8, 0.026, 0.008, 0.035, uvGlow, core, 0, 1);
+    gunSights(body, uv, 0.4, 0.04, 0.025);
+    gunHands(body, uv, -0.02, 0.24, -0.075);
+    glow.box(0, 0.01, 0.09, 0.02, 0.02, 0.1, uvGlow, core);
+  },
+};
+
+export function buildWeaponMesh(art = {}, id = 'arclight') {
+  const body = new MeshBuilder(1400);
+  const glow = new MeshBuilder(400);
   const uv = tileUV(TILE.METAL);
   const uvGlow = tileUV(TILE.GLOW);
-
-  const barrel = art.barrel == null ? 1 : art.barrel;
-  const bulk = art.bulk == null ? 1 : art.bulk;
   const core = art.glow || [0.45, 0.9, 1.0];
 
-  const steel = [0.62, 0.66, 0.72];
-  const dark = [0.3, 0.32, 0.36];
-  const brass = [0.75, 0.6, 0.32];
-
-  // Grip, angled back toward the hand.
-  body.box(0, -0.09, 0, 0.058 * bulk, 0.13, 0.05, uv, dark);
-  // Receiver.
-  body.box(0, 0, 0.06, 0.07 * bulk, 0.075 * bulk, 0.2, uv, steel);
-  // Barrel shroud with vents.
-  const shroudLen = 0.22 * barrel;
-  const shroudZ = 0.13 + shroudLen / 2;
-  body.box(0, 0.008, shroudZ, 0.05 * bulk, 0.05 * bulk, shroudLen, uv, dark);
-  const vents = Math.max(2, Math.round(3 * barrel));
-  for (let i = 0; i < vents; i++) {
-    body.box(0, 0.04 * bulk, 0.18 + i * (0.06 * barrel), 0.055 * bulk, 0.012, 0.022, uv, brass);
-  }
-  // Emitter ring at the muzzle.
-  const muzzleZ = 0.13 + shroudLen + 0.02;
-  body.prism(0, -0.03, muzzleZ, 8, 0.045 * bulk, 0.038 * bulk, 0.06, uv, brass);
-  // Top rail and rear sight.
-  body.box(0, 0.045 * bulk, 0.1, 0.03, 0.014, 0.16, uv, brass);
-  body.box(0, 0.062 * bulk, 0.03, 0.022, 0.02, 0.02, uv, steel);
-  // Heavy weapons wear a drum; light ones do not.
-  if (bulk > 1.15) body.prism(0, -0.055, 0.1, 8, 0.055, 0.05, 0.07, uv, dark);
-
-  // Charge core: the one part that reads at a glance, and the part the HUD
-  // heat bar is describing.
-  glow.box(0, 0.012, 0.1, 0.026 * bulk, 0.026 * bulk, 0.07, uvGlow, core);
-  glow.prism(0, -0.03, muzzleZ + 0.01, 8, 0.03 * bulk, 0.026 * bulk, 0.012, uvGlow, core);
+  const build = WEAPON_BUILDERS[id] || WEAPON_BUILDERS.arclight;
+  build(body, glow, uv, uvGlow, core);
 
   return { solid: body.finish(), glow: glow.finish() };
 }

@@ -73,6 +73,8 @@ export class Renderer {
 
     // Scratch matrices, allocated once.
     this.proj = mat4.create();
+    this.weaponProj = mat4.create();
+    this.weaponViewProj = mat4.create();
     this.view = mat4.create();
     this.viewProj = mat4.create();
     this.model = mat4.create();
@@ -406,7 +408,7 @@ export class Renderer {
     let entry = this.weaponMeshes.get(id);
     if (entry) return entry;
     const def = WEAPONS[id] || WEAPONS[STARTING_WEAPON];
-    const built = buildWeaponMesh(def ? def.art : undefined);
+    const built = buildWeaponMesh(def ? def.art : undefined, id);
     entry = {
       solid: new Mesh(this.gl, this.world, built.solid, null, VERTEX_LAYOUT),
       glow: new Mesh(this.gl, this.world, built.glow, null, VERTEX_LAYOUT),
@@ -442,20 +444,64 @@ export class Renderer {
     const uy = Math.cos(cam.pitch);
     const uz = Math.cos(cam.yaw) * Math.sin(cam.pitch);
 
-    const offR = 0.16 + this.weaponSway.x + bobX;
-    const offU = -0.17 + this.weaponSway.y + bob - (p.overheated ? 0.06 : 0);
-    const offF = 0.3 - recoil * 0.12;
+    // Offsets are in world units at the weapon's own distance, where the narrow
+    // lens shows about +/-0.59 across the frame: the gun sits a little right of
+    // centre and low, with about a third of it past the bottom edge.
+    const offR = 0.23 + (this.weaponSway.x + bobX) * 2.2;
+    const offU = -0.15 + (this.weaponSway.y + bob) * 2.2 - (p.overheated ? 0.09 : 0);
+    const offF = 1.5 - recoil * 0.28;
 
     const px = cam.x + rx * offR + ux * offU + fx * offF;
     const py = cam.y + uy * offU + fy * offF;
     const pz = cam.z + rz * offR + uz * offU + fz * offF;
 
-    // Build the model matrix directly from the camera basis: columns are
-    // right, up, forward, translation.
+    // Model matrix from the camera basis, with three things folded in.
+    //
+    // A scale, because the weapons are modelled at a comfortable size to author
+    // and would otherwise be drawn life-size a handspan from the lens, where a
+    // half-metre barrel crosses the whole screen.
+    //
+    // A yaw, so the muzzle points slightly inward toward the crosshair instead
+    // of straight down the camera axis, and a pitch, so it hangs rather than
+    // floats. Both are what make it read as held.
+    // The viewmodel gets its own projection.
+    //
+    // A gun held twenty centimetres from a 72-degree lens is half a metre of
+    // model spanning most of the frustum, so its muzzle is drawn two and a half
+    // times smaller than its breech and the barrel appears to fall away up the
+    // screen. Moving it back fixes the divergence but shrinks it; a narrow
+    // field of view magnifies it back without touching the depth ratios. Both
+    // together are what makes a held weapon look held.
+    mat4.perspective(this.weaponProj, 0.42, RENDER_W / RENDER_H, 0.05, 20);
+    mat4.multiply(this.weaponViewProj, this.weaponProj, this.view);
+    w.mat4('uViewProj', this.weaponViewProj);
+
+    const S = 1.25;
+    const ya = -0.34;
+    const pa = 0.1;
+    const cy = Math.cos(ya);
+    const sy = Math.sin(ya);
+    const cpit = Math.cos(pa);
+    const spit = Math.sin(pa);
+
+    // Local axes expressed in world space: right, up, forward of the weapon.
+    const exX = (rx * cy + fx * sy) * S;
+    const exY = (0 * cy + fy * sy) * S;
+    const exZ = (rz * cy + fz * sy) * S;
+    const ezX0 = -rx * sy + fx * cy;
+    const ezY0 = -0 * sy + fy * cy;
+    const ezZ0 = -rz * sy + fz * cy;
+    const eyX = (ux * cpit - ezX0 * spit) * S;
+    const eyY = (uy * cpit - ezY0 * spit) * S;
+    const eyZ = (uz * cpit - ezZ0 * spit) * S;
+    const ezX = (ezX0 * cpit + ux * spit) * S;
+    const ezY = (ezY0 * cpit + uy * spit) * S;
+    const ezZ = (ezZ0 * cpit + uz * spit) * S;
+
     const m = this.model;
-    m[0] = rx; m[1] = 0; m[2] = rz; m[3] = 0;
-    m[4] = ux; m[5] = uy; m[6] = uz; m[7] = 0;
-    m[8] = fx; m[9] = fy; m[10] = fz; m[11] = 0;
+    m[0] = exX; m[1] = exY; m[2] = exZ; m[3] = 0;
+    m[4] = eyX; m[5] = eyY; m[6] = eyZ; m[7] = 0;
+    m[8] = ezX; m[9] = ezY; m[10] = ezZ; m[11] = 0;
     m[12] = px; m[13] = py; m[14] = pz; m[15] = 1;
 
     gl.clear(gl.DEPTH_BUFFER_BIT);
@@ -479,6 +525,9 @@ export class Renderer {
     w.vec3('uEmissive', 0, 0, 0);
     w.float('uEmissivePulse', 0);
     w.vec4('uTintFlash', 1, 0.15, 0.12, g.damageFlash() * 0.16);
+    // Hand the world projection back; the weapon is the only thing that uses
+    // its own, and anything drawn after it would inherit a 24-degree lens.
+    w.mat4('uViewProj', this.viewProj);
   }
 
   uploadLights(w, cam) {
