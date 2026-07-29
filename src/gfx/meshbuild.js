@@ -5,7 +5,15 @@
  * occlusion, and turn creature descriptors into low-poly bodies. Everything is
  * built from a handful of primitives so a new monster is a data edit.
  *
- * Vertex layout (12 floats): position(3) normal(3) uv(2) colour(3) ao(1)
+ * Vertex layout (15 floats):
+ *   position(3) normal(3) uv(2) colour(3) ao(1) uv2(2) blend(1)
+ *
+ * The second UV set and the blend weight exist for one reason: a floor built
+ * from one tile per quad is a floor built from squares, however good the tile
+ * is and however much the ground under it rolls. With two layers and a weight
+ * that is a smooth function of world position, one material gives way to
+ * another across a surface instead of at a quad boundary. Everything that is
+ * not a floor sets uv2 = uv and blend = 0 and pays nothing but the bytes.
  */
 import { CELL, WALL_H, GRID_W, GRID_H, C } from '../core/constants.js';
 import { groundAt, ceilingAt, floorCorner, ceilCorner, roughAt } from '../core/world/terrain.js';
@@ -13,14 +21,18 @@ import { fieldAt } from '../core/world/contour.js';
 import { TILE, tileUV } from './textures.js';
 import { STYLES } from '../data/decor.js';
 
-export const VERTEX_FLOATS = 12;
+export const VERTEX_FLOATS = 15;
 export const VERTEX_LAYOUT = [
   { name: 'aPos', size: 3 },
   { name: 'aNormal', size: 3 },
   { name: 'aUv', size: 2 },
   { name: 'aColor', size: 3 },
   { name: 'aAO', size: 1 },
+  { name: 'aUv2', size: 2 },
+  { name: 'aBlend', size: 1 },
 ];
+
+const ZERO4 = [0, 0, 0, 0];
 
 /** Growable vertex buffer. */
 export class MeshBuilder {
@@ -39,7 +51,7 @@ export class MeshBuilder {
     this.data = next;
   }
 
-  vertex(px, py, pz, nx, ny, nz, u, v, r, g, b, ao) {
+  vertex(px, py, pz, nx, ny, nz, u, v, r, g, b, ao, u2, v2, blend) {
     const i = this.count * VERTEX_FLOATS;
     const d = this.data;
     d[i] = px;
@@ -54,6 +66,9 @@ export class MeshBuilder {
     d[i + 9] = g;
     d[i + 10] = b;
     d[i + 11] = ao;
+    d[i + 12] = u2 === undefined ? u : u2;
+    d[i + 13] = v2 === undefined ? v : v2;
+    d[i + 14] = blend === undefined ? 0 : blend;
     this.count++;
   }
 
@@ -61,29 +76,48 @@ export class MeshBuilder {
    * Quad from four corners in winding order, with per-corner AO.
    * Corners are [x,y,z] arrays.
    */
-  quad(a, b, c, d, normal, uv, color, ao = [1, 1, 1, 1]) {
+  quad(a, b, c, d, normal, uv, color, ao = [1, 1, 1, 1], layer2 = null) {
     this.ensure(6);
     const [nx, ny, nz] = normal;
     const [r, g, bl] = color;
+    // Second layer, if this surface has one: the same four corners in the same
+    // order, with a per-corner weight.
+    const uv2 = layer2 ? layer2.uv : uv;
+    const w = layer2 ? layer2.weights : ZERO4;
     // Counter-clockwise as seen from the side the given normal points at — the
     // winding GL treats as front-facing. Corners are listed A,B,C,D around the
     // quad, so the triangles run A,D,C and C,B,A.
     // Split along the diagonal that keeps AO gradients smooth.
     const flip = ao[0] + ao[2] < ao[1] + ao[3];
+    // `swap` transposes the tile — a diagonal mirror. Combined with the two
+    // axis mirrors it gives all eight orientations of a square, which is what
+    // it takes to stop a regular tile like cobble from drawing a lattice.
+    //
+    // It has to transpose *within the tile's own rectangle*: exchanging the u
+    // and v values outright sends the lookup into whichever slot happens to sit
+    // at those coordinates in the atlas, which is how the first attempt at this
+    // painted the floor magenta. So the swap exchanges which corner index drives
+    // each axis, and each axis keeps its own range.
+    const corner = (rect, lu, lv) => {
+      const su = rect.swap ? lv : lu;
+      const sv = rect.swap ? lu : lv;
+      return [su ? rect.u1 : rect.u0, sv ? rect.v1 : rect.v0];
+    };
+    const P = (pos, lu, lv, k) => {
+      const t1 = corner(uv, lu, lv);
+      const t2 = corner(uv2, lu, lv);
+      this.vertex(pos[0], pos[1], pos[2], nx, ny, nz, t1[0], t1[1], r, g, bl, ao[k], t2[0], t2[1], w[k]);
+    };
+    const A = () => P(a, 0, 0, 0);
+    const B = () => P(b, 1, 0, 1);
+    const Cc = () => P(c, 1, 1, 2);
+    const D = () => P(d, 0, 1, 3);
     if (flip) {
-      this.vertex(b[0], b[1], b[2], nx, ny, nz, uv.u1, uv.v0, r, g, bl, ao[1]);
-      this.vertex(a[0], a[1], a[2], nx, ny, nz, uv.u0, uv.v0, r, g, bl, ao[0]);
-      this.vertex(d[0], d[1], d[2], nx, ny, nz, uv.u0, uv.v1, r, g, bl, ao[3]);
-      this.vertex(d[0], d[1], d[2], nx, ny, nz, uv.u0, uv.v1, r, g, bl, ao[3]);
-      this.vertex(c[0], c[1], c[2], nx, ny, nz, uv.u1, uv.v1, r, g, bl, ao[2]);
-      this.vertex(b[0], b[1], b[2], nx, ny, nz, uv.u1, uv.v0, r, g, bl, ao[1]);
+      B(); A(); D();
+      D(); Cc(); B();
     } else {
-      this.vertex(a[0], a[1], a[2], nx, ny, nz, uv.u0, uv.v0, r, g, bl, ao[0]);
-      this.vertex(d[0], d[1], d[2], nx, ny, nz, uv.u0, uv.v1, r, g, bl, ao[3]);
-      this.vertex(c[0], c[1], c[2], nx, ny, nz, uv.u1, uv.v1, r, g, bl, ao[2]);
-      this.vertex(c[0], c[1], c[2], nx, ny, nz, uv.u1, uv.v1, r, g, bl, ao[2]);
-      this.vertex(b[0], b[1], b[2], nx, ny, nz, uv.u1, uv.v0, r, g, bl, ao[1]);
-      this.vertex(a[0], a[1], a[2], nx, ny, nz, uv.u0, uv.v0, r, g, bl, ao[0]);
+      A(); D(); Cc();
+      Cc(); B(); A();
     }
   }
 
@@ -97,7 +131,7 @@ export class MeshBuilder {
    * The derived normal always agrees with quad()'s winding, so the face is
    * never accidentally culled: to show the other side, reverse the corners.
    */
-  quadAuto(a, b, c, d, uv, color, ao) {
+  quadAuto(a, b, c, d, uv, color, ao, layer2 = null) {
     const ux = c[0] - a[0];
     const uy = c[1] - a[1];
     const uz = c[2] - a[2];
@@ -108,7 +142,7 @@ export class MeshBuilder {
     const ny = vz * ux - vx * uz;
     const nz = vx * uy - vy * ux;
     const s = 1 / (Math.hypot(nx, ny, nz) || 1);
-    this.quad(a, b, c, d, [nx * s, ny * s, nz * s], uv, color, ao);
+    this.quad(a, b, c, d, [nx * s, ny * s, nz * s], uv, color, ao, layer2);
   }
 
   /**
@@ -318,6 +352,19 @@ function uvVariant(uv, hash) {
 }
 
 /**
+ * All eight orientations, for floors only.
+ *
+ * A wall does not get this: transposing masonry stands the brick courses on
+ * end, which reads as a mistake rather than as variety. A floor has no such
+ * grain and gains the most from it.
+ */
+function uvVariant8(uv, hash) {
+  const out = uvVariant(uv, hash);
+  out.swap = (hash & 16) !== 0;
+  return out;
+}
+
+/**
  * @returns {{ solid: Float32Array, glow: Float32Array }}
  */
 export function buildLevelMesh(dungeon, floorDef) {
@@ -368,6 +415,11 @@ export function buildLevelMesh(dungeon, floorDef) {
       // Eight entries so a three-bit hash indexes it without a modulo.
       mix: (def.mix || [def.floor, def.floor, def.floor, def.floor, def.floor, def.floor, def.floor, def.floor])
         .map((n) => slot(n, TILE.FLOOR)),
+      // The two materials a floor is blended from. Fixed per style rather than
+      // picked per quad, because the weight has to be continuous and a weight
+      // between two *different* pairs on either side of an edge is not.
+      overlayA: slot((def.mix || [])[2], TILE.MORTAR),
+      overlayB: slot((def.mix || [])[4], TILE.ROCK),
       wallTint: tinted(pal.wall),
       floorTint: tinted(pal.floor),
       ceilTint: tinted(pal.ceiling),
@@ -520,11 +572,26 @@ export function buildLevelMesh(dungeon, floorDef) {
               const u1 = (sx + 1) / N;
               const v0 = sy / N;
               const v1 = (sy + 1) / N;
-              // A fresh tile *and* a fresh flip per sub-quad. Between them the
-              // eye stops finding the four-unit lattice the cells are on.
+              // Base tile keeps its per-quad flip — that alone breaks the
+              // repeat. The *material* change is done with a second layer whose
+              // weight is sampled per corner from a smooth field, so a patch of
+              // dirt fades into stone over a metre instead of stopping dead on
+              // a quad edge. Two neighbouring quads sample the same field at
+              // the same shared corner and therefore agree exactly.
               const sh = (hash ^ (sx * 0x9e3779b1) ^ (sy * 0x85ebca6b)) >>> 0;
-              const picked = isHazard || isStairs ? uv : style.mix[(sh >>> 5) & 7];
-              const sub = uvVariant(picked, sh);
+              const sub = uvVariant8(uv, sh);
+              const plain = isHazard || isStairs;
+              const layer2 = plain
+                ? null
+                : {
+                    uv: uvVariant8(patchTile(style, ax, az), sh >>> 3),
+                    weights: [
+                      patchWeight(ax, az),
+                      patchWeight(bx, az),
+                      patchWeight(bx, bz),
+                      patchWeight(ax, bz),
+                    ],
+                  };
               target.quadAuto(
                 [ax, groundAt(terrain, ax, az) - drop, az],
                 [bx, groundAt(terrain, bx, az) - drop, az],
@@ -533,6 +600,7 @@ export function buildLevelMesh(dungeon, floorDef) {
                 sub,
                 tint,
                 [aoAt(u0, v0), aoAt(u1, v0), aoAt(u1, v1), aoAt(u0, v1)],
+                layer2,
               );
             }
           }
@@ -772,6 +840,67 @@ function nearOpen(cells, gx, gy) {
 }
 
 /**
+ * How much of the overlay material shows at this point.
+ *
+ * Two octaves, pushed through a smoothstep so most of the floor is one
+ * material or the other and only the border between them is a gradient. A
+ * linear weight everywhere reads as mud; a hard step reads as tiles.
+ */
+function patchWeight(x, z) {
+  const n =
+    wobbleNoise(x * 0.085, z * 0.085, 0x7a11) * 0.7 +
+    wobbleNoise(x * 0.21 + 9.4, z * 0.21 - 3.3, 0x31c9) * 0.3;
+  const t = (n + 1) * 0.5;
+  const lo = 0.42;
+  const hi = 0.72;
+  if (t <= lo) return 0;
+  if (t >= hi) return 1;
+  const u = (t - lo) / (hi - lo);
+  return u * u * (3 - 2 * u);
+}
+
+/**
+ * Which overlay a patch is made of. Chosen from a field coarse enough that one
+ * patch is one material all the way across — switching material inside a patch
+ * would put a hard edge in the middle of a soft gradient.
+ */
+function patchTile(style, x, z) {
+  return wobbleNoise(x * 0.035 + 61.7, z * 0.035 - 22.1, 0x5bd1) > 0 ? style.overlayA : style.overlayB;
+}
+
+/** Smooth 2D value noise; two calls give an offset vector. */
+function wobbleNoise(x, y, seed) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const fx = x - xi;
+  const fy = y - yi;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const at = (ix, iy) => {
+    let h = (Math.imul(ix, 374761393) ^ Math.imul(iy, 668265263) ^ seed) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const a = at(xi, yi);
+  const b = at(xi + 1, yi);
+  const c = at(xi, yi + 1);
+  const d = at(xi + 1, yi + 1);
+  const top = a + (b - a) * sx;
+  const bot = c + (d - c) * sx;
+  return (top + (bot - top) * sy) * 2 - 1;
+}
+
+/** How far a point on a cave wall leans at this height. Position-only. */
+function leanOffset(x, z, band, amount) {
+  const s = 0.28;
+  const seed = 0x51ed + band * 7919;
+  return [
+    wobbleNoise(x * s, z * s, seed) * amount,
+    wobbleNoise(x * s + 41.3, z * s - 17.9, seed ^ 0x2f9d) * amount,
+  ];
+}
+
+/**
  * Extrude the cave isoline into wall.
  *
  * Each segment becomes one quad from the ground to the ceiling at its own two
@@ -816,12 +945,6 @@ function buildContourWalls(mb, contour, terrain, uv, pal) {
     const ca = ceilingAt(terrain, ax + ox, az + oz) + 0.15;
     const cb = ceilingAt(terrain, bx + ox, bz + oz) + 0.15;
 
-    // Recompute the open-side normal after any swap above.
-    const ux = (bx - ax) / len;
-    const uz = (bz - az) / len;
-    const onx = -uz;
-    const onz = ux;
-
     // Bands. A single quad from floor to ceiling stretches one tile over three
     // and a half units and lights as one flat plane, which is why the first
     // version looked like putty. Three bands give the texture something to
@@ -829,23 +952,23 @@ function buildContourWalls(mb, contour, terrain, uv, pal) {
     // displacement along the normal — the bulges and overhangs that stop a
     // cave wall from being an extruded line.
     const BANDS = 3;
-    const wobble = (t, e) => {
-      const k = (Math.imul(i + 1, 2654435761) ^ Math.imul(((t * 7) | 0) + e * 31, 40503)) >>> 0;
-      const h = Math.imul(k ^ (k >>> 13), 1274126177) >>> 0;
-      return (((h ^ (h >>> 16)) >>> 0) / 4294967296 - 0.5) * 0.55;
-    };
+    // Displacement is a function of *where the endpoint is*, never of which
+    // segment is asking. Two segments meet at a shared endpoint, and the first
+    // version derived the offset from the segment index — so each side moved
+    // that shared point somewhere different and the wall tore open along a
+    // vertical slit at every join. Position in, offset out, and the seam
+    // closes by construction.
     let prevA = [ax, fa, az];
     let prevB = [bx, fb, bz];
     for (let band = 1; band <= BANDS; band++) {
       const t = band / BANDS;
-      // Pushed into the rock in the middle of the wall and back out at the
-      // top: a section that leans rather than stands.
-      const bulgeA = wobble(t, 0) * Math.sin(t * Math.PI);
-      const bulgeB = wobble(t, 1) * Math.sin(t * Math.PI);
+      const lean = Math.sin(t * Math.PI) * 0.45;
+      const oa = leanOffset(ax, az, band, lean);
+      const ob = leanOffset(bx, bz, band, lean);
       const ya = fa + (ca - fa) * t;
       const yb = fb + (cb - fb) * t;
-      const curA = [ax - onx * bulgeA, ya, az - onz * bulgeA];
-      const curB = [bx - onx * bulgeB, yb, bz - onz * bulgeB];
+      const curA = [ax + oa[0], ya, az + oa[1]];
+      const curB = [bx + ob[0], yb, bz + ob[1]];
       const lo = 0.5 + 0.5 * ((band - 1) / BANDS);
       const hi = 0.5 + 0.5 * (band / BANDS);
       mb.quadAuto(curA, curB, prevB, prevA, uv, tint, [hi, hi, lo, lo]);

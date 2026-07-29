@@ -513,9 +513,14 @@ export function generateDungeon(rng, floorDef) {
     }
     if (crowded) continue;
     propLights.push(pr);
+    // Not every glowing prop has a height — embers and springs are described by
+    // a radius — so the lamp sits a fixed way up when there is nothing to
+    // measure. Reading an undefined height here produced a NaN light, and one
+    // NaN in the light array turns off the lighting for the entire floor.
+    const propH = Number.isFinite(pr.h) ? pr.h : 0.3;
     lights.push({
       x: pr.x,
-      y: pr.y + (pr.kind === 'sconce' ? 0.1 : pr.h * 0.7 + 0.1),
+      y: pr.y + (pr.kind === 'sconce' ? 0.1 : propH * 0.7 + 0.1),
       z: pr.z,
       r: pr.color[0],
       g: pr.color[1],

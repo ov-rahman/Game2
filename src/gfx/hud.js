@@ -138,10 +138,12 @@ export class HudPainter {
     const heat = clamp(p.heat, 0, 1);
     const hx = RENDER_W - 62;
     this.plate(hx - 6, by - 27, 68, 37, 0.42);
-    // What you are holding, above the heat bar it belongs to.
+    // What you are holding, above the heat bar it belongs to. Right-aligned so
+    // a long name grows inward instead of off the edge of the screen.
     const wep = WEAPONS[p.inv.weaponId] || WEAPONS[STARTING_WEAPON];
     if (wep) {
-      this.text(wep.name, hx - 2, by - 16, {
+      this.text(wep.name, RENDER_W - 8, by - 16, {
+        align: 'right',
         color: rarityOf(wep.quality).hud,
       });
     }
@@ -176,13 +178,20 @@ export class HudPainter {
     // --- floor label ------------------------------------------------------
     const def = g.floorDef;
     if (def) {
-      this.plate(4, 4, 12 + def.name.length * 6, 14, 0.42);
-      this.text(`${def.index}/5  ${def.name}`, 10, 14, { color: '#b0c8ba' });
+      const label = `${def.index}/5  ${def.name}`;
+      this.plate(4, 4, label.length * 5.8 + 12, 14, 0.42);
+      this.text(label, 10, 14, { color: '#b0c8ba' });
     }
 
     // --- objective --------------------------------------------------------
-    if (g.objective) {
-      this.text(g.objective, RENDER_W / 2, 14, { align: 'center', size: 7, color: '#c8b878' });
+    // On its own line under the floor label. Sharing a line worked until a
+    // floor was called "ПРИЗМАТИЧЕСКАЯ СОКРОВИЩНИЦА" and the two ran through
+    // each other.
+    const bossUp = g.enemies.some((e) => e.isBoss && e.alive && !e.dormant);
+    if (g.objective && !bossUp) {
+      const oy = 26;
+      this.plate(RENDER_W / 2 - g.objective.length * 3 - 6, oy - 10, g.objective.length * 6 + 12, 14, 0.4);
+      this.text(g.objective, RENDER_W / 2, oy, { align: 'center', color: '#d8c68a' });
     }
 
     // --- boss bar ---------------------------------------------------------

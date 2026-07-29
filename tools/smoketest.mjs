@@ -343,6 +343,31 @@ async function main() {
     return out;
   });
 
+  // A single non-finite value in a light blacks out an entire floor with no
+  // error to say so. It has happened twice; it gets a check.
+  const lightCheck = await page.evaluate(async () => {
+    const { generateDungeon } = await import('./src/core/world/dungeongen.js');
+    const { FLOORS } = await import('./src/data/floors.js');
+    const { Rng } = await import('./src/core/rng.js');
+    const out = { checked: 0, errors: [] };
+    const keys = ['x', 'y', 'z', 'radius', 'intensity', 'r', 'g', 'b'];
+    for (const f of FLOORS) {
+      for (let seed = 0; seed < 12; seed++) {
+        const d = generateDungeon(new Rng(seed * 17 + 2), f);
+        for (const l of d.lights) {
+          out.checked++;
+          for (const k of keys) {
+            if (!Number.isFinite(l[k])) {
+              out.errors.push(`${f.id} seed ${seed}: light.${k} is ${l[k]}`);
+              break;
+            }
+          }
+        }
+      }
+    }
+    return out;
+  });
+
   const gearCheck = await page.evaluate(async () => {
     const { Game } = await import('./src/core/game.js');
     const { WEAPON_IDS, RELIC_IDS, BOSS_RELIC } = await import('./src/data/gear.js');
@@ -460,6 +485,10 @@ async function main() {
   console.log(`bosses          ${bossCheck.bosses.map((b) => `${b.name}${b.killed ? '✓' : '✗'}(p${b.phase})`).join(' ')}`);
   console.log(`items           ${itemCheck.checked} exercised`);
   console.log(
+    `lights          ${lightCheck.checked} checked` +
+      (lightCheck.errors.length ? `, ${lightCheck.errors.length} NON-FINITE` : ', all finite'),
+  );
+  console.log(
     `gear            ${gearCheck.weapons} weapons, ${gearCheck.relics} relics, ` +
       `${gearCheck.bossRelics}/5 boss drops`,
   );
@@ -471,6 +500,7 @@ async function main() {
     ...bossCheck.errors,
     ...itemCheck.errors,
     ...gearCheck.errors,
+    ...lightCheck.errors.slice(0, 5),
     ...(megaCheck.ok ? [] : [megaCheck.error]),
     ...bossCheck.bosses.filter((b) => !b.killed).map((b) => `boss not killable: ${b.name} (floor ${b.floor})`),
   ];

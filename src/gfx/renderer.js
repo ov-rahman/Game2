@@ -488,7 +488,22 @@ export class Renderer {
     scratch.length = 0;
 
     for (const l of lights) {
-      if (!Number.isFinite(l.x) || !Number.isFinite(l.z) || !Number.isFinite(l.radius)) continue;
+      // Every component, not just the ones that seemed likely. A single
+      // non-finite value anywhere in this array propagates through the shader's
+      // light loop and blacks out every surface on the floor, with no error
+      // anywhere to say so — so the check has to be total.
+      if (
+        !Number.isFinite(l.x) ||
+        !Number.isFinite(l.y) ||
+        !Number.isFinite(l.z) ||
+        !Number.isFinite(l.radius) ||
+        !Number.isFinite(l.intensity) ||
+        !Number.isFinite(l.r) ||
+        !Number.isFinite(l.g) ||
+        !Number.isFinite(l.b)
+      ) {
+        continue;
+      }
       const dx = l.x - cam.x;
       const dz = l.z - cam.z;
       const d2 = dx * dx + dz * dz;

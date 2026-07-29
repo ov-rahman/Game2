@@ -33,6 +33,8 @@ in vec3 aNormal;
 in vec2 aUv;
 in vec3 aColor;
 in float aAO;
+in vec2 aUv2;
+in float aBlend;
 
 uniform mat4 uViewProj;
 uniform mat4 uModel;
@@ -42,6 +44,8 @@ uniform vec2 uJitterRes;
 out vec3 vWorld;
 out vec3 vNormal;
 out vec2 vUv;
+out vec2 vUv2;
+out float vBlend;
 out vec3 vColor;
 out float vAO;
 
@@ -50,6 +54,8 @@ void main() {
   vWorld = world.xyz;
   vNormal = normalize(mat3(uModel) * aNormal);
   vUv = aUv;
+  vUv2 = aUv2;
+  vBlend = aBlend;
   vColor = aColor;
   vAO = aAO;
 
@@ -72,6 +78,8 @@ precision highp float;
 in vec3 vWorld;
 in vec3 vNormal;
 in vec2 vUv;
+in vec2 vUv2;
+in float vBlend;
 in vec3 vColor;
 in float vAO;
 
@@ -100,7 +108,13 @@ out vec4 fragColor;
 ${COMMON_FOG}
 
 void main() {
+  // Two materials, mixed by a weight that varies smoothly across the surface.
+  // This is what turns a grid of tiles into ground: dirt gives way to stone
+  // over half a metre instead of at the edge of a quad.
   vec4 texel = texture(uTex, vUv);
+  if (vBlend > 0.001) {
+    texel = mix(texel, texture(uTex, vUv2), vBlend);
+  }
   if (texel.a < 0.35) discard;
 
   vec3 albedo = texel.rgb * vColor;
