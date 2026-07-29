@@ -115,12 +115,15 @@ export function updateSenses(game, e, dt) {
   e.ai.alertCd -= dt;
 
   let noticed = false;
-  if (t.d < def.sight) {
+  // Полое лёгкое: crouched, the player is not merely quiet — past three metres
+  // there is nothing to see at all.
+  const sightLimit = game.player.vanished ? Math.min(def.sight, 3) : def.sight;
+  if (t.d < sightLimit) {
     const facing = Math.abs(angleDelta(e.yaw, Math.atan2(t.dx, t.dz)));
     const lit = game.torchLightsPoint(e.x, e.z) ? 1.35 : 1;
     const inCone = facing < 1.35 || t.d < 4;
     if (inCone && hasLineOfSight(game.dungeon.cells, e.x, e.z, t.p.x, t.p.z, {})) {
-      if (t.d < def.sight * lit) noticed = true;
+      if (t.d < sightLimit * lit) noticed = true;
     }
   }
   // Noise: sprinting, shooting and explosions all raise the player's signature.

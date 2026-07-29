@@ -314,6 +314,57 @@ export function generateDungeon(rng, floorDef) {
   }
   for (const r of rooms) r.snapshot = null;
 
+  // ---- secrets ----------------------------------------------------------
+  // A hollow behind a cracked wall. The block in front of it is ordinary
+  // rubble — the same thing the player has been shooting all game — so the
+  // mechanism needs no explaining, and finding one is a matter of noticing
+  // that a stretch of wall has something behind it.
+  const secrets = [];
+  {
+    const wanted = rng.int(1, 2);
+    let tries = 0;
+    while (secrets.length < wanted && tries++ < 400) {
+      const r = rng.pick(rooms);
+      if (r.kind === ROOM_KIND.BOSS || r.plan === 'cave') continue;
+      // A cell on the room's rim, with two cells of rock behind it.
+      const side = rng.int(0, 3);
+      const px = side === 2 ? r.x : side === 3 ? r.x + r.w - 1 : rng.int(r.x + 1, r.x + r.w - 2);
+      const py = side === 0 ? r.y : side === 1 ? r.y + r.h - 1 : rng.int(r.y + 1, r.y + r.h - 2);
+      const dx = side === 2 ? -1 : side === 3 ? 1 : 0;
+      const dy = side === 0 ? -1 : side === 1 ? 1 : 0;
+      if (cells[idx(px, py)] !== C.FLOOR) continue;
+
+      const wx = px + dx;
+      const wy = py + dy;
+      const ax = px + dx * 2;
+      const ay = py + dy * 2;
+      if (!inside(wx, wy) || !inside(ax, ay)) continue;
+      if (cells[idx(wx, wy)] !== C.SOLID || cells[idx(ax, ay)] !== C.SOLID) continue;
+      // The chamber must be buried: no open cell may touch it except through
+      // the block, or it is not a secret, it is a doorway.
+      let sealed = true;
+      for (let oy = -1; oy <= 1 && sealed; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const nx = ax + ox;
+          const ny = ay + oy;
+          if (!inside(nx, ny)) { sealed = false; break; }
+          if (nx === wx && ny === wy) continue;
+          if (nx === ax && ny === ay) continue;
+          if (cells[idx(nx, ny)] !== C.SOLID) { sealed = false; break; }
+        }
+      }
+      if (!sealed) continue;
+
+      cells[idx(wx, wy)] = C.RUBBLE;
+      cells[idx(ax, ay)] = C.FLOOR;
+      roomAt[idx(ax, ay)] = r.id;
+      elev[idx(ax, ay)] = elev[idx(px, py)];
+      headroom[idx(ax, ay)] = headroom[idx(px, py)];
+      elevSet[idx(ax, ay)] = 1;
+      secrets.push({ gx: ax, gy: ay, x: (ax + 0.5) * CELL, z: (ay + 0.5) * CELL, room: r.id });
+    }
+  }
+
   // ---- doorways --------------------------------------------------------
   // A floor cell on a room boundary with exactly two open neighbours across is
   // a threshold: mark it so the mesh builder can frame it.
@@ -408,6 +459,7 @@ export function generateDungeon(rng, floorDef) {
 
   const dungeon = {
     def: floorDef,
+    secrets,
     cells,
     roomAt,
     rooms,

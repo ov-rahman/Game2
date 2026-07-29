@@ -9,6 +9,7 @@
 import { RENDER_W, RENDER_H } from '../core/constants.js';
 import { STATE } from '../core/game.js';
 import { clamp } from '../core/math3.js';
+import { WEAPONS, RELICS, STARTING_WEAPON, rarityOf } from '../data/gear.js';
 
 const FONT = 'monospace';
 
@@ -136,7 +137,14 @@ export class HudPainter {
     // --- ammo / heat ------------------------------------------------------
     const heat = clamp(p.heat, 0, 1);
     const hx = RENDER_W - 62;
-    this.plate(hx - 6, by - 16, 68, 26, 0.42);
+    this.plate(hx - 6, by - 27, 68, 37, 0.42);
+    // What you are holding, above the heat bar it belongs to.
+    const wep = WEAPONS[p.inv.weaponId] || WEAPONS[STARTING_WEAPON];
+    if (wep) {
+      this.text(wep.name, hx - 2, by - 16, {
+        color: rarityOf(wep.quality).hud,
+      });
+    }
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(hx - 1, by - 1, 52 + 2, barH + 2);
     ctx.fillStyle = p.overheated ? '#e4543f' : heat > 0.7 ? '#e8a04a' : '#7fb8e8';
@@ -146,9 +154,13 @@ export class HudPainter {
     });
 
     // --- resources --------------------------------------------------------
-    this.plate(RENDER_W - 58, 4, 54, 24, 0.42);
+    const relics = p.inv.relics.length;
+    this.plate(RENDER_W - 58, 4, 54, relics ? 34 : 24, 0.42);
     this.text(`◈ ${p.coins}`, RENDER_W - 10, 14, { align: 'right', color: '#f0dc98' });
     this.text(`✦ ${p.inv.items.length}`, RENDER_W - 10, 24, { align: 'right', color: '#b8d4f0' });
+    if (relics) {
+      this.text(`❖ ${relics}`, RENDER_W - 10, 34, { align: 'right', color: rarityOf(5).hud });
+    }
 
     // --- active item ------------------------------------------------------
     if (p.inv.activeId) {
@@ -369,15 +381,28 @@ export class HudPainter {
       this.text(r[1], x + 100 + col * 112, y + 42 + row * 12, { size: 7, color: '#d8e0c8', align: 'right' });
     });
 
-    let sy = y + 88;
-    this.text('связки:', x + 16, sy, { size: 7, color: '#8fd66a' });
-    sy += 10;
+    let sy = y + 86;
+    this.text('связки:', x + 16, sy, { color: '#8fd66a' });
+    sy += 11;
     if (!p.inv.synergies.length) {
-      this.text('— пока нет —', x + 20, sy, { size: 6, color: '#5f6a60' });
+      this.text('— пока нет —', x + 20, sy, { color: '#7f8a80' });
+      sy += 11;
     } else {
-      for (const s of p.inv.synergies.slice(0, 4)) {
-        this.text(`★ ${s.name}`, x + 20, sy, { size: 6, color: '#a8d8a0' });
-        sy += 9;
+      for (const s of p.inv.synergies.slice(0, 3)) {
+        this.text(`★ ${s.name}`, x + 20, sy, { color: '#a8d8a0' });
+        sy += 10;
+      }
+    }
+
+    // Relics get their own line: they are the ones that changed a rule.
+    if (p.inv.relics.length) {
+      sy += 3;
+      this.text('реликвии:', x + 16, sy, { color: rarityOf(5).hud });
+      sy += 11;
+      for (const id of p.inv.relics.slice(0, 3)) {
+        const rel = RELICS[id];
+        if (rel) this.text(`❖ ${rel.name}`, x + 20, sy, { color: '#e8dca8' });
+        sy += 10;
       }
     }
     this.text('ESC — продолжить    R — заново', RENDER_W / 2, y + h - 10, {

@@ -7,6 +7,7 @@
  */
 import { ITEMS, ACTIVES, BASE_STATS } from '../../data/items.js';
 import { SYNERGIES } from '../../data/synergies.js';
+import { WEAPONS, RELICS, STARTING_WEAPON } from '../../data/gear.js';
 
 const HOOK_NAMES = [
   'onPickup',
@@ -26,6 +27,8 @@ export function createInventory() {
   return {
     items: [],
     counts: Object.create(null),
+    weaponId: STARTING_WEAPON,
+    relics: [],
     activeId: null,
     activeName: '',
     activeCharge: 0,
@@ -71,6 +74,28 @@ export function addItem(game, player, id) {
   return inv.synergies.filter((s) => !before.has(s.id));
 }
 
+/** Swap the weapon. Returns the previous one so the shell can announce it. */
+export function setWeapon(player, id) {
+  if (!WEAPONS[id]) return null;
+  const prev = player.inv.weaponId;
+  player.inv.weaponId = id;
+  player.statsDirty = true;
+  return prev;
+}
+
+export function currentWeapon(player) {
+  return WEAPONS[player.inv.weaponId] || WEAPONS[STARTING_WEAPON];
+}
+
+/** Take a relic. Duplicates are impossible: each boss has exactly one. */
+export function addRelic(player, id) {
+  if (!RELICS[id]) return false;
+  if (player.inv.relics.includes(id)) return false;
+  player.inv.relics.push(id);
+  player.statsDirty = true;
+  return true;
+}
+
 export function setActive(player, id) {
   const act = ACTIVES[id];
   if (!act) return null;
@@ -86,6 +111,23 @@ export function setActive(player, id) {
 export function recomputeStats(game, player) {
   const s = Object.assign({}, BASE_STATS);
   const flags = Object.create(null);
+
+  // The weapon goes first and *replaces* rather than adds: it is not a bonus,
+  // it is what you are holding. Everything after it modifies what it left.
+  const weapon = WEAPONS[player.inv.weaponId] || WEAPONS[STARTING_WEAPON];
+  if (weapon) {
+    if (weapon.stats) for (const k in weapon.stats) s[k] = weapon.stats[k];
+    if (weapon.flags) for (const k in weapon.flags) flags[k] = (flags[k] || 0) + weapon.flags[k];
+  }
+
+  // Relics next. They deal in flags, not numbers, which is what separates them
+  // from items — a relic changes a rule.
+  for (const id of player.inv.relics) {
+    const rel = RELICS[id];
+    if (!rel) continue;
+    if (rel.stats) for (const k in rel.stats) s[k] = (s[k] || 0) + rel.stats[k];
+    if (rel.flags) for (const k in rel.flags) flags[k] = (flags[k] || 0) + rel.flags[k];
+  }
 
   for (const id of player.inv.items) {
     const it = ITEMS[id];

@@ -436,36 +436,53 @@ export { FORMS as CREATURE_FORMS };
  * the camera and never depth-tests it against the world, so it can never clip
  * into a wall.
  */
-export function buildWeaponMesh() {
-  const body = new MeshBuilder(600);
-  const glow = new MeshBuilder(120);
+/**
+ * The thing in your hands.
+ *
+ * Built from the weapon's `art` — barrel length, bulk and core colour — so
+ * swapping weapons changes what you are looking at, not just the numbers
+ * behind it. Same skeleton for all of them on purpose: it should read as the
+ * same pair of hands holding a different tool.
+ */
+export function buildWeaponMesh(art = {}) {
+  const body = new MeshBuilder(700);
+  const glow = new MeshBuilder(160);
   const uv = tileUV(TILE.METAL);
   const uvGlow = tileUV(TILE.GLOW);
+
+  const barrel = art.barrel == null ? 1 : art.barrel;
+  const bulk = art.bulk == null ? 1 : art.bulk;
+  const core = art.glow || [0.45, 0.9, 1.0];
 
   const steel = [0.62, 0.66, 0.72];
   const dark = [0.3, 0.32, 0.36];
   const brass = [0.75, 0.6, 0.32];
-  const core = [0.45, 0.9, 1.0];
 
   // Grip, angled back toward the hand.
-  body.box(0, -0.09, 0, 0.058, 0.13, 0.05, uv, dark);
+  body.box(0, -0.09, 0, 0.058 * bulk, 0.13, 0.05, uv, dark);
   // Receiver.
-  body.box(0, 0, 0.06, 0.07, 0.075, 0.2, uv, steel);
+  body.box(0, 0, 0.06, 0.07 * bulk, 0.075 * bulk, 0.2, uv, steel);
   // Barrel shroud with vents.
-  body.box(0, 0.008, 0.24, 0.05, 0.05, 0.22, uv, dark);
-  for (let i = 0; i < 3; i++) {
-    body.box(0, 0.04, 0.18 + i * 0.06, 0.055, 0.012, 0.022, uv, brass);
+  const shroudLen = 0.22 * barrel;
+  const shroudZ = 0.13 + shroudLen / 2;
+  body.box(0, 0.008, shroudZ, 0.05 * bulk, 0.05 * bulk, shroudLen, uv, dark);
+  const vents = Math.max(2, Math.round(3 * barrel));
+  for (let i = 0; i < vents; i++) {
+    body.box(0, 0.04 * bulk, 0.18 + i * (0.06 * barrel), 0.055 * bulk, 0.012, 0.022, uv, brass);
   }
   // Emitter ring at the muzzle.
-  body.prism(0, -0.03, 0.35, 8, 0.045, 0.038, 0.06, uv, brass);
+  const muzzleZ = 0.13 + shroudLen + 0.02;
+  body.prism(0, -0.03, muzzleZ, 8, 0.045 * bulk, 0.038 * bulk, 0.06, uv, brass);
   // Top rail and rear sight.
-  body.box(0, 0.045, 0.1, 0.03, 0.014, 0.16, uv, brass);
-  body.box(0, 0.062, 0.03, 0.022, 0.02, 0.02, uv, steel);
+  body.box(0, 0.045 * bulk, 0.1, 0.03, 0.014, 0.16, uv, brass);
+  body.box(0, 0.062 * bulk, 0.03, 0.022, 0.02, 0.02, uv, steel);
+  // Heavy weapons wear a drum; light ones do not.
+  if (bulk > 1.15) body.prism(0, -0.055, 0.1, 8, 0.055, 0.05, 0.07, uv, dark);
 
   // Charge core: the one part that reads at a glance, and the part the HUD
   // heat bar is describing.
-  glow.box(0, 0.012, 0.1, 0.026, 0.026, 0.07, uvGlow, core);
-  glow.prism(0, -0.03, 0.36, 8, 0.03, 0.026, 0.012, uvGlow, core);
+  glow.box(0, 0.012, 0.1, 0.026 * bulk, 0.026 * bulk, 0.07, uvGlow, core);
+  glow.prism(0, -0.03, muzzleZ + 0.01, 8, 0.03 * bulk, 0.026 * bulk, 0.012, uvGlow, core);
 
   return { solid: body.finish(), glow: glow.finish() };
 }

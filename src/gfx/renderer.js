@@ -27,6 +27,7 @@ import { buildAtlas, buildSpriteSheet, spriteUV, SPRITE } from './textures.js';
 import { buildLevelMesh, VERTEX_LAYOUT } from './meshbuild.js';
 import { buildCreatureMesh, buildWeaponMesh } from './creatures.js';
 import { HudPainter } from './hud.js';
+import { WEAPONS, STARTING_WEAPON } from '../data/gear.js';
 
 const BILLBOARD_LAYOUT = [
   { name: 'aCenter', size: 3 },
@@ -60,9 +61,8 @@ export class Renderer {
     this.levelLiquidMesh = null;
     this.creatureMeshes = new Map();
 
-    const weapon = buildWeaponMesh();
-    this.weaponMesh = new Mesh(gl, this.world, weapon.solid, null, VERTEX_LAYOUT);
-    this.weaponGlowMesh = new Mesh(gl, this.world, weapon.glow, null, VERTEX_LAYOUT);
+    // One mesh per weapon, built on first use and kept.
+    this.weaponMeshes = new Map();
     this.weaponSway = { x: 0, y: 0 };
 
     this.sprites = new DynamicMesh(gl, this.billboard, 6 * 1400 * BILLBOARD_FLOATS, BILLBOARD_LAYOUT);
@@ -402,10 +402,24 @@ export class Renderer {
    * top of the world, and positioned relative to the camera basis rather than
    * in world space, which keeps it rock-steady while the level wobbles.
    */
+  weaponMeshFor(id) {
+    let entry = this.weaponMeshes.get(id);
+    if (entry) return entry;
+    const def = WEAPONS[id] || WEAPONS[STARTING_WEAPON];
+    const built = buildWeaponMesh(def ? def.art : undefined);
+    entry = {
+      solid: new Mesh(this.gl, this.world, built.solid, null, VERTEX_LAYOUT),
+      glow: new Mesh(this.gl, this.world, built.glow, null, VERTEX_LAYOUT),
+    };
+    this.weaponMeshes.set(id, entry);
+    return entry;
+  }
+
   drawWeapon(w, g, cam, frameDt) {
     const gl = this.gl;
     const p = g.player;
     if (p.dead) return;
+    const held = this.weaponMeshFor(p.inv ? p.inv.weaponId : STARTING_WEAPON);
 
     // Sway lags the aim: the weapon catches up to where you are looking.
     const targetX = clamp(-g.lookDeltaX * 6, -0.05, 0.05);
@@ -447,11 +461,21 @@ export class Renderer {
     gl.clear(gl.DEPTH_BUFFER_BIT);
     w.mat4('uModel', m);
     w.vec4('uTintFlash', 1, 0.3, 0.2, p.overheated ? 0.35 : 0);
-    this.weaponMesh.draw();
+    held.solid.draw();
+    // The core's own colour comes from the weapon; heat only pushes it toward
+    // white-hot. Hardcoding the ramp here made every gun glow the same blue.
     const heat = clamp(p.heat, 0, 1);
-    w.vec3('uEmissive', 0.6 + heat * 2.2, 0.9 - heat * 0.5, 1.3 - heat * 1.0);
+    const wep = WEAPONS[p.inv ? p.inv.weaponId : STARTING_WEAPON] || WEAPONS[STARTING_WEAPON];
+    const gc = (wep && wep.art && wep.art.glow) || [0.45, 0.9, 1.0];
+    const hot = 0.9 + heat * 1.9;
+    w.vec3(
+      'uEmissive',
+      gc[0] * hot + heat * 0.7,
+      gc[1] * hot,
+      gc[2] * hot * (1 - heat * 0.45),
+    );
     w.float('uEmissivePulse', 1);
-    this.weaponGlowMesh.draw();
+    held.glow.draw();
     w.vec3('uEmissive', 0, 0, 0);
     w.float('uEmissivePulse', 0);
     w.vec4('uTintFlash', 1, 0.15, 0.12, g.damageFlash() * 0.16);
@@ -564,7 +588,11 @@ export class Renderer {
       w.mat4('uModel', this.model);
       if (mesh.solid) mesh.solid.draw();
       if (mesh.glow) {
-        w.vec3('uEmissive', 1.6, 1.5, 1.4);
+        // Rarity tints the glow, so what is standing on a pedestal is legible
+        // from the doorway — before you are close enough to read the prompt.
+        const t = p.tint;
+        if (t) w.vec3('uEmissive', 1.7 * t[0], 1.7 * t[1], 1.7 * t[2]);
+        else w.vec3('uEmissive', 1.6, 1.5, 1.4);
         w.float('uEmissivePulse', 1);
         mesh.glow.draw();
         w.vec3('uEmissive', 0, 0, 0);

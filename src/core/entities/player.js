@@ -58,6 +58,8 @@ export function createPlayer(x, z) {
     statsDirty: true,
 
     wardUsed: false,
+    bellUsed: false,
+    vanished: false,
     reviveUsed: false,
     orbitals: [],
     markedUid: 0,
@@ -156,6 +158,9 @@ export function updatePlayer(game, p, dt, input) {
   // How loud the player currently is — the core of the stealth layer.
   p.noise = p.crouching ? 0.35 : p.sprinting ? 1.55 : 1;
   if (p.shootCd > 0.02) p.noise = Math.max(p.noise, 1.9);
+  // Полое лёгкое: crouching stops being quiet and starts being absent.
+  p.vanished = !!p.flags.vanish && p.crouching && p.shootCd <= 0;
+  if (p.vanished) p.noise = 0;
 
   // ---- weapon ----------------------------------------------------------
   if (p.shootCd > 0) p.shootCd -= dt;
@@ -172,9 +177,18 @@ export function updatePlayer(game, p, dt, input) {
     if (!p.timers.overload && !p.flags.noHeat) {
       p.heat += st.heatPerShot;
       if (p.heat >= 1) {
-        p.heat = 1;
-        p.overheated = true;
-        game.sfx('deny', { gain: 0.7 });
+        if (p.flags.noHeatLock) {
+          // Сердце углей: the gun does not seize, it vents. Overheating stops
+          // being a punishment and becomes something you aim for.
+          p.heat = 0;
+          game.explode(p.x, p.y + 0.9, p.z, 5.5, 12 + st.damage * 1.4, TEAM.PLAYER, { color: [1, 0.5, 0.15] });
+          game.sfx('bossRoar', { gain: 0.5, rate: 1.6 });
+          game.fx('muzzle', { x: p.x, y: p.y + 1, z: p.z });
+        } else {
+          p.heat = 1;
+          p.overheated = true;
+          game.sfx('deny', { gain: 0.7 });
+        }
       }
     }
     p.recoil = Math.min(0.5, p.recoil + 0.14);

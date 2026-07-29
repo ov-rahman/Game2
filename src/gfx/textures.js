@@ -476,7 +476,9 @@ function paintRockTile(ctx, T, pal, seed) {
 }
 
 function paintMortarTile(ctx, T, pal, seed) {
-  ctx.fillStyle = shade(pal.wall, -0.3);
+  // Used as a floor patch as well as a niche backing, so it has to read as
+  // packed dirt rather than as a hole burnt in the floor.
+  ctx.fillStyle = shade(pal.wall, -0.16);
   ctx.fillRect(0, 0, T, T);
   grain(ctx, 0, 0, T, T, shade(pal.wall, 0.1), 0.12, seed + 141, 0.35);
   grain(ctx, 0, 0, T, T, '#000000', 0.1, seed + 143, 0.3);

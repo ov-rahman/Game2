@@ -27,11 +27,21 @@ import { ShotPool } from './entities/projectile.js';
 import { createEnemy, updateEnemy } from './entities/enemy.js';
 import { createPlayer, updatePlayer, aimDirection } from './entities/player.js';
 import { updateShots, updateAreas } from './combat.js';
-import { addItem, setActive, recomputeStats, runHook, chargeActive, hasItem } from './items/inventory.js';
+import {
+  addItem,
+  setActive,
+  recomputeStats,
+  runHook,
+  chargeActive,
+  hasItem,
+  setWeapon,
+  addRelic,
+} from './items/inventory.js';
 import { cloneShot as cloneShotImpl } from './items/shots.js';
 import { createBoss, updateBoss } from './bosses/index.js';
 import { FLOORS, getFloor, FLOOR_COUNT } from '../data/floors.js';
 import { ITEMS, ITEM_IDS, ACTIVES, ACTIVE_IDS } from '../data/items.js';
+import { WEAPONS, WEAPON_IDS, RELICS, BOSS_RELIC, STARTING_WEAPON, rarityOf } from '../data/gear.js';
 import { ENEMIES } from '../data/enemies.js';
 import { SPRITE } from '../data/sprite-ids.js';
 import { clamp, lerp, dist2d, dist2dSq, angleDelta } from './math3.js';
@@ -186,6 +196,7 @@ export class Game {
     this.player.y = groundAt(this.dungeon.terrain, this.player.x, this.player.z);
     this.player.vx = this.player.vz = 0;
     this.player.wardUsed = false;
+    this.player.bellUsed = false;
     if (this.player.flags.reviveRefresh) this.player.reviveUsed = false;
 
     this.torch.range = this.player.stats.torchRange;
@@ -223,6 +234,10 @@ export class Game {
       if (room.kind === ROOM_KIND.TREASURE) {
         const w = room.world();
         this.addProp({ type: 'pedestal', x: w.x, z: w.z, itemId: this.pickItem('treasure') });
+        // And a rack: the treasure room is where you go to change what you are
+        // shooting with, not only what you are shooting it with.
+        const spot = this.randomSpotIn(room);
+        this.addProp({ type: 'weapon', x: spot.x, z: spot.z, weaponId: this.pickWeapon() });
         continue;
       }
 
@@ -257,6 +272,39 @@ export class Game {
       if (this.rng.chance(0.55)) {
         const spot = this.randomSpotIn(room);
         this.addProp({ type: 'pickup', kind: this.rng.pick(['shard', 'shard', 'heal', 'battery']), x: spot.x, z: spot.z });
+      }
+
+      // Chests. Most hold supplies; one in six is a weapon crate, and a
+      // challenge room's chest is locked behind clearing it.
+      if (this.rng.chance(0.3)) {
+        const spot = this.randomSpotIn(room);
+        const roll = this.rng.next();
+        const chest = { type: 'chest', x: spot.x, z: spot.z, opened: false };
+        if (roll < 0.16) {
+          chest.kind = 'weapon';
+          chest.weaponId = this.pickWeapon();
+        } else if (roll < 0.42) {
+          chest.kind = 'item';
+          chest.itemId = this.pickItem('treasure');
+          chest.locked = true;
+          chest.roomId = room.id;
+        } else {
+          chest.kind = 'supply';
+        }
+        this.addProp(chest);
+      }
+    }
+
+    // Whatever is walled up behind the cracked block. Worth the ammunition:
+    // a secret that pays out a battery is a secret nobody looks for twice.
+    for (const sec of this.dungeon.secrets || []) {
+      const roll = this.rng.next();
+      if (roll < 0.4) {
+        this.addProp({ type: 'pedestal', x: sec.x, z: sec.z, itemId: this.pickItem('treasure') });
+      } else if (roll < 0.6) {
+        this.addProp({ type: 'weapon', x: sec.x, z: sec.z, weaponId: this.pickWeapon() });
+      } else {
+        this.addProp({ type: 'chest', x: sec.x, z: sec.z, kind: 'supply', opened: false });
       }
     }
 
@@ -311,10 +359,18 @@ export class Game {
   }
 
   addProp(p) {
-    p.y = groundAt(this.dungeon.terrain, p.x, p.z) + (p.type === 'pickup' ? 0.55 : 0.8);
+    const lift =
+      p.type === 'pickup' ? 0.55 : p.type === 'chest' ? 0.45 : p.type === 'weapon' ? 0.7 : 0.8;
+    p.y = groundAt(this.dungeon.terrain, p.x, p.z) + lift;
     p.phase = this.rng.angle();
-    p.scale = p.type === 'pedestal' ? 0.8 : 0.5;
-    p.art = p.type === 'pickup' ? 'lantern' : p.type === 'shop' ? 'lantern' : 'prismSprite';
+    p.scale = p.type === 'pedestal' ? 0.8 : p.type === 'relic' ? 0.7 : p.type === 'chest' ? 0.75 : 0.5;
+    p.art = p.type === 'pickup' || p.type === 'shop' ? 'lantern' : 'prismSprite';
+    // Rarity drives the colour a pedestal glows, so what is on it reads across
+    // a room before you can see what it is.
+    if (p.type === 'relic') p.tint = rarityOf(5).color;
+    else if (p.itemId && ITEMS[p.itemId]) p.tint = rarityOf(ITEMS[p.itemId].quality).color;
+    else if (p.type === 'weapon' && WEAPONS[p.weaponId]) p.tint = rarityOf(WEAPONS[p.weaponId].quality).color;
+    else if (p.type === 'chest') p.tint = [0.95, 0.8, 0.45];
     p.taken = false;
     this.props.push(p);
     return p;
@@ -425,7 +481,10 @@ export class Game {
 
     // Torch battery: the pacing mechanism of the whole game.
     if (this.torch.on && this.torch.charge > 0) {
-      this.torch.charge = Math.max(0, this.torch.charge - this.player.stats.torchDrain * sdt);
+      // Долгая ночь: the lamp only costs you while the gun is warm.
+      const quiet = this.player.flags.quietTorch && this.player.heat < 0.02 && this.player.shootCd <= 0;
+      const drain = quiet ? 0 : this.player.stats.torchDrain;
+      this.torch.charge = Math.max(0, this.torch.charge - drain * sdt);
       if (this.torch.charge === 0) {
         this.message('ФОНАРЬ СЕЛ', 'найди батарею', 2.2);
         this.sfx('deny');
@@ -561,10 +620,43 @@ export class Game {
           this.prompt = 'сначала зачисти комнату';
           continue;
         }
-        this.prompt = `E — взять: ${ITEMS[prop.itemId].name}`;
+        const it = ITEMS[prop.itemId];
+        this.prompt = `E — взять: ${it.name}  [${rarityOf(it.quality).name}]`;
         if (this.interactPressed) {
           this.props.splice(i, 1);
           this.grantItem(prop.itemId);
+        }
+      } else if (prop.type === 'relic') {
+        const rel = RELICS[prop.relicId];
+        this.prompt = `E — забрать реликвию: ${rel.name}`;
+        if (this.interactPressed) {
+          this.props.splice(i, 1);
+          this.grantRelic(prop.relicId);
+        }
+      } else if (prop.type === 'weapon') {
+        const w = WEAPONS[prop.weaponId];
+        const cur = WEAPONS[p.inv.weaponId] || WEAPONS[STARTING_WEAPON];
+        this.prompt = `E — взять ${w.name}  (сейчас: ${cur.name})`;
+        if (this.interactPressed) {
+          // The old weapon stays on the rack, so a swap is reversible and
+          // picking one up is a decision rather than a trap.
+          const prev = setWeapon(p, prop.weaponId);
+          prop.weaponId = prev;
+          this.sfx('item');
+          this.message(w.name, w.desc, 3.4);
+          this.events.emit('weaponGet', { id: w, weaponId: prop.weaponId });
+        }
+      } else if (prop.type === 'chest') {
+        if (prop.locked && !this.roomCleared(prop.roomId)) {
+          this.prompt = 'сначала зачисти комнату';
+          continue;
+        }
+        // An opened chest must not clear a prompt some other prop set.
+        if (prop.opened) continue;
+        this.prompt = 'E — открыть сундук';
+        if (this.interactPressed) {
+          prop.opened = true;
+          this.openChest(prop);
         }
       } else if (prop.type === 'shop') {
         const price = prop.price;
@@ -620,6 +712,9 @@ export class Game {
     const room = roomAtWorld(this.dungeon, this.player.x, this.player.z);
     if (room && !room.seen) {
       room.seen = true;
+      // Both once-per-room safety nets recharge on the threshold.
+      this.player.wardUsed = false;
+      this.player.bellUsed = false;
       runHook(this.player, 'onRoomEnter', { game: this, player: this.player, room });
     }
   }
@@ -735,8 +830,13 @@ export class Game {
       this.bossActive = false;
       this.objective = 'лестница открыта';
       this.message('ПУТЬ ВНИЗ ОТКРЫТ', '', 3);
-      // Boss reward.
+      // Boss reward: an item, and the relic that belongs to this boss. The
+      // relic is a trophy rather than a roll — clear the floor, get the thing.
       this.addProp({ type: 'pedestal', x: e.x + 2, z: e.z, itemId: this.pickItem('boss') });
+      const relicId = BOSS_RELIC[e.id];
+      if (relicId && !this.player.inv.relics.includes(relicId)) {
+        this.addProp({ type: 'relic', x: e.x - 2.4, z: e.z + 1.4, relicId });
+      }
       for (let i = 0; i < 6; i++) {
         this.dropPickup(e.x + this.rng.range(-2, 2), e.z + this.rng.range(-2, 2), 'shard');
       }
@@ -766,6 +866,14 @@ export class Game {
       }
     }
 
+    // Десятина: every tenth kill gives one point back.
+    if (this.player.flags.tithe) {
+      this.player.counters.tithe = (this.player.counters.tithe || 0) + 1;
+      if (this.player.counters.tithe >= 10) {
+        this.player.counters.tithe = 0;
+        if (this.healPlayer(1) > 0) this.sfx('heal');
+      }
+    }
     runHook(this.player, 'onKill', { game: this, player: this.player, enemy: e });
 
     if (!e.fromSpawn) {
@@ -975,7 +1083,33 @@ export class Game {
     this.shake(1.1, 0.35, 0.4);
     runHook(p, 'onHurt', { game: this, player: p, amount: dmg, source: opts.source });
     this.events.emit('playerHurt', { amount: dmg, hp: p.hp });
-    if (p.hp <= 0) this.killPlayer();
+
+    // Второе лицо: what hits you from behind goes back where it came from.
+    if (p.flags.riposte && opts.enemy && dmg > 0) {
+      const dx = opts.enemy.x - p.x;
+      const dz = opts.enemy.z - p.z;
+      const fx = Math.sin(p.yaw);
+      const fz = Math.cos(p.yaw);
+      const d = Math.hypot(dx, dz) || 1;
+      if ((dx / d) * fx + (dz / d) * fz < -0.25) {
+        this.damageEnemy(opts.enemy, dmg * 6, { source: 'riposte' });
+        this.fx('spark', { x: opts.enemy.x, y: opts.enemy.y + 1, z: opts.enemy.z, color: [1, 0.5, 0.8] });
+        this.sfx('crit');
+      }
+    }
+
+    if (p.hp <= 0) {
+      // Утопший колокол: once per room, the drop to zero does not land.
+      if (p.flags.bell && !p.bellUsed) {
+        p.bellUsed = true;
+        p.hp = 1;
+        p.invuln = 1.6;
+        this.sfx('block');
+        this.message('УТОПШИЙ КОЛОКОЛ', 'смерть отменена', 2.4);
+        return dmg;
+      }
+      this.killPlayer();
+    }
     return dmg;
   }
 
@@ -1052,6 +1186,54 @@ export class Game {
     });
     this.seenItems.add(id);
     return id;
+  }
+
+  grantRelic(id) {
+    const rel = RELICS[id];
+    if (!rel || !addRelic(this.player, id)) return;
+    this.stats.itemsTaken++;
+    this.sfx('synergy');
+    this.message(`РЕЛИКВИЯ — ${rel.name}`, rel.desc, 4.5);
+    this.events.emit('relicGet', { id, relic: rel });
+  }
+
+  /**
+   * Open a chest.
+   *
+   * A chest is worth walking to, which is the whole design: never nothing, and
+   * occasionally the thing that decides the run.
+   */
+  openChest(prop) {
+    this.sfx('confirm');
+    this.fx('pickup', { x: prop.x, y: prop.y + 0.5, z: prop.z, color: [1, 0.85, 0.4] });
+    if (prop.kind === 'weapon') {
+      // Offset so the rack does not stand inside the crate it came out of.
+      this.addProp({ type: 'weapon', x: prop.x + 1.1, z: prop.z + 0.6, weaponId: prop.weaponId });
+      this.message('ОРУЖЕЙНЫЙ ЯЩИК', WEAPONS[prop.weaponId].name, 3);
+      return;
+    }
+    if (prop.kind === 'item') {
+      this.grantItem(prop.itemId);
+      return;
+    }
+    const coins = this.rng.int(6, 14);
+    this.player.coins += coins;
+    for (let i = 0; i < 3; i++) {
+      this.dropPickup(prop.x + this.rng.range(-1, 1), prop.z + this.rng.range(-1, 1), 'shard');
+    }
+    this.torch.charge = Math.min(1, this.torch.charge + 0.3);
+    this.message('СУНДУК', `${coins} ◈ и немного заряда`, 2.6);
+  }
+
+  /** A weapon the player is not already carrying. */
+  pickWeapon() {
+    const pool = WEAPON_IDS.filter((id) => id !== this.player.inv.weaponId && id !== STARTING_WEAPON);
+    if (!pool.length) return STARTING_WEAPON;
+    const luck = this.player.stats ? this.player.stats.luck : 0;
+    return this.rng.weighted(pool, (id) => {
+      const q = WEAPONS[id].quality || 1;
+      return Math.max(0.25, 1 + (q - 3) * (0.25 + luck * 0.05));
+    });
   }
 
   grantItem(id) {

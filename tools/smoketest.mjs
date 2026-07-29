@@ -343,6 +343,83 @@ async function main() {
     return out;
   });
 
+  const gearCheck = await page.evaluate(async () => {
+    const { Game } = await import('./src/core/game.js');
+    const { WEAPON_IDS, RELIC_IDS, BOSS_RELIC } = await import('./src/data/gear.js');
+    const { setWeapon, addRelic } = await import('./src/core/items/inventory.js');
+    const out = { weapons: 0, relics: 0, bossRelics: 0, errors: [] };
+    const input = () => ({
+      move: { x: 1, z: -1 }, look: { dx: 0.01, dy: 0 },
+      down: { fire: true, crouch: true }, pressed: {}, pointerLocked: true, gamepad: false,
+    });
+
+    // Every weapon fired for a few seconds, on its own.
+    for (const id of WEAPON_IDS) {
+      try {
+        const g = new Game({ seed: 4141 });
+        g.startRun(4141);
+        setWeapon(g.player, id);
+        const inp = input();
+        for (let i = 0; i < 240; i++) g.step(1 / 60, inp);
+        out.weapons++;
+      } catch (e) {
+        out.errors.push(`weapon ${id}: ${e.message}`);
+      }
+    }
+
+    // Every relic, then all of them at once — the combination is where a flag
+    // that assumes it is alone falls over.
+    for (const id of RELIC_IDS) {
+      try {
+        const g = new Game({ seed: 5252 });
+        g.startRun(5252);
+        addRelic(g.player, id);
+        const inp = input();
+        for (let i = 0; i < 240; i++) g.step(1 / 60, inp);
+        out.relics++;
+      } catch (e) {
+        out.errors.push(`relic ${id}: ${e.message}`);
+      }
+    }
+    try {
+      const g = new Game({ seed: 6363 });
+      g.startRun(6363);
+      for (const id of RELIC_IDS) addRelic(g.player, id);
+      for (const id of WEAPON_IDS) setWeapon(g.player, id);
+      const inp = input();
+      for (let i = 0; i < 600; i++) g.step(1 / 60, inp);
+    } catch (e) {
+      out.errors.push(`all gear: ${e.message}`);
+    }
+
+    // Each boss must actually hand over its own relic.
+    for (let f = 1; f <= 5; f++) {
+      try {
+        const g = new Game({ seed: 7000 + f });
+        g.startRun(7000 + f);
+        while (g.floorIndex < f) g.nextFloor();
+        const boss = g.enemies.find((e) => e.isBoss);
+        if (!boss) { out.errors.push(`floor ${f}: no boss`); continue; }
+        boss.dormant = false;
+        const inp = { move: { x: 0, z: 0 }, look: { dx: 0, dy: 0 }, down: {}, pressed: {} };
+        let guard = 0;
+        while (boss.alive && guard++ < 4000) {
+          g.damageEnemy(boss, 300, {});
+          g.step(1 / 60, inp);
+        }
+        const drop = g.props.find((pr) => pr.type === 'relic');
+        if (!drop || drop.relicId !== BOSS_RELIC[boss.id]) {
+          out.errors.push(`floor ${f}: relic drop ${drop ? drop.relicId : 'none'} != ${BOSS_RELIC[boss.id]}`);
+        } else {
+          out.bossRelics++;
+        }
+      } catch (e) {
+        out.errors.push(`boss relic ${f}: ${e.message}`);
+      }
+    }
+    return out;
+  });
+
   const megaCheck = await page.evaluate(async () => {
     const { Game } = await import('./src/core/game.js');
     const { ITEM_IDS } = await import('./src/data/items.js');
@@ -382,6 +459,10 @@ async function main() {
   console.log(`core sim        ${coreCheck.floors} floor generations across 10 seeds`);
   console.log(`bosses          ${bossCheck.bosses.map((b) => `${b.name}${b.killed ? '✓' : '✗'}(p${b.phase})`).join(' ')}`);
   console.log(`items           ${itemCheck.checked} exercised`);
+  console.log(
+    `gear            ${gearCheck.weapons} weapons, ${gearCheck.relics} relics, ` +
+      `${gearCheck.bossRelics}/5 boss drops`,
+  );
   console.log(`all-items run   ${megaCheck.ok ? `ok (${megaCheck.synergies} synergies active)` : `FAILED ${megaCheck.error}`}`);
 
   const allErrors = [
@@ -389,6 +470,7 @@ async function main() {
     ...coreCheck.errors,
     ...bossCheck.errors,
     ...itemCheck.errors,
+    ...gearCheck.errors,
     ...(megaCheck.ok ? [] : [megaCheck.error]),
     ...bossCheck.bosses.filter((b) => !b.killed).map((b) => `boss not killable: ${b.name} (floor ${b.floor})`),
   ];
