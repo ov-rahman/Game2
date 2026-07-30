@@ -19,6 +19,8 @@
  * @property {Object<string,boolean>} pressed Rising edge per action, valid for one tick.
  * @property {boolean} pointerLocked
  * @property {boolean} gamepad
+ * @property {{x:number,y:number,active:boolean}} cursor Pointer position in
+ *           internal render coordinates, for menus. Inactive while locked.
  */
 
 /**
@@ -112,4 +114,11 @@ export const ACTIONS = [
   'fullscreen',
   'restart',
   'debug',
+  // Menu navigation. Kept separate from movement so a screen can be driven by
+  // the same keys, the D-pad and a stick without any of them fighting.
+  'menuUp',
+  'menuDown',
+  'menuLeft',
+  'menuRight',
+  'click',
 ];

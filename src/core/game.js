@@ -34,6 +34,7 @@ import { ITEMS, ITEM_IDS, ACTIVES, ACTIVE_IDS } from '../data/items.js';
 import { ENEMIES } from '../data/enemies.js';
 import { SPRITE } from '../data/sprite-ids.js';
 import { clamp, lerp, dist2d, dist2dSq, angleDelta } from './math3.js';
+import { Menu } from './ui/menu.js';
 
 export const STATE = {
   TITLE: 'title',
@@ -44,6 +45,18 @@ export const STATE = {
 };
 
 const NAV_INTERVAL = 0.22;
+
+/** Shipped defaults; the settings screen resets to exactly this. */
+export const DEFAULT_SETTINGS = {
+  filterStrength: 1,
+  brightness: 0,
+  wobble: true,
+  sensitivity: 0.0022,
+  invertY: false,
+  master: 0.85,
+  music: 0.45,
+  sfx: 1,
+};
 
 /** Seconds without taking a hit before the player starts patching up. */
 const REGEN_DELAY = 11;
@@ -57,12 +70,8 @@ export class Game {
     this.seed = this.rng.seed;
 
     this.state = STATE.TITLE;
-    this.settings = {
-      filterStrength: 1,
-      brightness: 0,
-      wobble: true,
-      sensitivity: 0.0022,
-    };
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.menu = new Menu(this);
 
     this.shots = new ShotPool(opts.shotCap || 420);
     this.enemies = [];
@@ -112,6 +121,12 @@ export class Game {
 
     this.stats = this.freshStats();
     this.seenItems = new Set();
+  }
+
+  /** Restore every setting to the shipped value. */
+  resetSettings() {
+    Object.assign(this.settings, DEFAULT_SETTINGS);
+    this.events.emit('settingsChanged', { settings: this.settings });
   }
 
   freshStats() {
@@ -418,7 +433,13 @@ export class Game {
   // ---------------------------------------------------------------- step
 
   step(dt, input) {
-    if (this.state === STATE.TITLE || this.state === STATE.PAUSED) return;
+    this.syncMenu();
+    if (this.menu.open) {
+      this.stepMenu(input);
+      // The death and victory screens keep animating behind their menu.
+      if (this.state !== STATE.TITLE && this.state !== STATE.PAUSED) this.updateTimers(dt);
+      return;
+    }
     if (this.state !== STATE.PLAYING) {
       this.updateTimers(dt);
       return;
@@ -518,6 +539,54 @@ export class Game {
     p.hp = Math.min(cap, p.hp + 1);
     p.statsDirty = true;
     this.fx('heal', { x: p.x, y: p.y + 1, z: p.z });
+  }
+
+  // ------------------------------------------------------------------ menu
+
+  /** Keep the menu stack in step with the game state. */
+  syncMenu() {
+    switch (this.state) {
+      case STATE.TITLE: this.menu.show('title'); break;
+      case STATE.PAUSED: this.menu.show('pause'); break;
+      case STATE.DEAD: this.menu.show('dead'); break;
+      case STATE.WIN: this.menu.show('win'); break;
+      default: this.menu.closeAll();
+    }
+  }
+
+  stepMenu(input) {
+    const m = this.menu;
+    const pressed = input.pressed;
+    if (pressed.menuUp) m.move(-1);
+    if (pressed.menuDown) m.move(1);
+    if (pressed.menuLeft) m.adjust(-1);
+    if (pressed.menuRight) m.adjust(1);
+    if (pressed.confirm || pressed.interact || pressed.use) m.activate();
+
+    // Escape steps back out of a sub-screen; at the top of a pause menu it
+    // means "resume", which only the shell can arrange.
+    if (pressed.cancel || pressed.pause) {
+      if (!m.back() && this.state === STATE.PAUSED) {
+        this.events.emit('uiCommand', { name: 'resume' });
+      }
+    }
+
+    const cur = input.cursor;
+    if (cur && cur.active) {
+      m.hover(cur.x, cur.y);
+      if (pressed.click) m.click(cur.x, cur.y);
+    }
+  }
+
+  /** Abandon the run and go back to the title screen. */
+  toTitle() {
+    this.state = STATE.TITLE;
+    this.bossActive = false;
+    this.shots.clear();
+    this.messages.length = 0;
+    this.showMap = false;
+    this.syncMenu();
+    this.events.emit('toTitle', {});
   }
 
   updateTimers(dt) {

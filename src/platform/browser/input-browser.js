@@ -6,6 +6,7 @@
  * from a different source without touching gameplay code.
  */
 import { ACTIONS } from '../interfaces.js';
+import { RENDER_W, RENDER_H } from '../../core/constants.js';
 
 const KEYMAP = {
   KeyW: 'forward',
@@ -47,7 +48,27 @@ const PADMAP = {
   7: 'fire',
   9: 'pause',
   10: 'sprint',
+  12: 'menuUp',
+  13: 'menuDown',
+  14: 'menuLeft',
+  15: 'menuRight',
 };
+
+/** Keys that drive a menu as well as the player. */
+const MENUMAP = {
+  KeyW: 'menuUp',
+  ArrowUp: 'menuUp',
+  KeyS: 'menuDown',
+  ArrowDown: 'menuDown',
+  KeyA: 'menuLeft',
+  ArrowLeft: 'menuLeft',
+  KeyD: 'menuRight',
+  ArrowRight: 'menuRight',
+};
+
+/** Stick deflection needed to count as one menu step, and to re-arm. */
+const STICK_ON = 0.6;
+const STICK_OFF = 0.35;
 
 const DEADZONE = 0.22;
 
@@ -71,11 +92,16 @@ export function createBrowserInput(canvas, opts = {}) {
   // the cursor stays free.
   let wantLock = false;
 
+  const cursor = { x: 0, y: 0, active: false };
+  let stickArmedX = true;
+  let stickArmedY = true;
+
   const snapshot = {
     move: { x: 0, z: 0 },
     look: { dx: 0, dy: 0 },
     down,
     pressed,
+    cursor,
     pointerLocked: false,
     gamepad: false,
     anyPressed: false,
@@ -89,16 +115,22 @@ export function createBrowserInput(canvas, opts = {}) {
 
   function onKeyDown(e) {
     const action = KEYMAP[e.code];
-    if (!action) return;
+    const menu = MENUMAP[e.code];
+    if (!action && !menu) return;
     // These would otherwise scroll the page or move focus out of the canvas.
     if (e.code === 'Tab' || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
-    if (e.repeat) return;
-    setAction(action, true);
+    // Menu navigation repeats when a key is held; gameplay actions do not.
+    if (menu && e.repeat) setAction(menu, false);
+    if (e.repeat && !menu) return;
+    if (action) setAction(action, true);
+    if (menu) setAction(menu, true);
   }
 
   function onKeyUp(e) {
     const action = KEYMAP[e.code];
     if (action) setAction(action, false);
+    const menu = MENUMAP[e.code];
+    if (menu) setAction(menu, false);
   }
 
   function onBlur() {
@@ -106,7 +138,18 @@ export function createBrowserInput(canvas, opts = {}) {
   }
 
   function onMouseMove(e) {
-    if (!locked) return;
+    if (!locked) {
+      // Unlocked: the pointer is a menu cursor. Report it in the internal
+      // render resolution so the core can hit-test what the HUD drew.
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        cursor.x = ((e.clientX - rect.left) / rect.width) * RENDER_W;
+        cursor.y = ((e.clientY - rect.top) / rect.height) * RENDER_H;
+        cursor.active = true;
+      }
+      return;
+    }
+    cursor.active = false;
     lookX += e.movementX * sensitivity;
     lookY += e.movementY * sensitivity * (invertY ? -1 : 1);
   }
@@ -118,7 +161,9 @@ export function createBrowserInput(canvas, opts = {}) {
       if (wantLock) {
         api.requestLock();
         e.preventDefault();
+        return;
       }
+      if (e.button === 0) setAction('click', true);
       return;
     }
     if (e.button === 0) setAction('fire', true);
@@ -127,8 +172,10 @@ export function createBrowserInput(canvas, opts = {}) {
   }
 
   function onMouseUp(e) {
-    if (e.button === 0) setAction('fire', false);
-    else if (e.button === 2) setAction('altFire', false);
+    if (e.button === 0) {
+      setAction('fire', false);
+      setAction('click', false);
+    } else if (e.button === 2) setAction('altFire', false);
   }
 
   function onWheel(e) {
@@ -219,8 +266,20 @@ export function createBrowserInput(canvas, opts = {}) {
       lookX = 0;
       lookY = 0;
 
+      // A stick has to return near centre before it can step a menu again,
+      // or holding it flings the highlight down the list.
+      if (Math.abs(pad.mz) > STICK_ON && stickArmedY) {
+        pressed[pad.mz < 0 ? 'menuUp' : 'menuDown'] = true;
+        stickArmedY = false;
+      } else if (Math.abs(pad.mz) < STICK_OFF) stickArmedY = true;
+      if (Math.abs(pad.mx) > STICK_ON && stickArmedX) {
+        pressed[pad.mx < 0 ? 'menuLeft' : 'menuRight'] = true;
+        stickArmedX = false;
+      } else if (Math.abs(pad.mx) < STICK_OFF) stickArmedX = true;
+
       snapshot.pointerLocked = locked;
       snapshot.gamepad = pad.connected;
+      if (locked) cursor.active = false;
 
       let any = false;
       for (const a of ACTIONS) {
