@@ -98,6 +98,7 @@ export function createPlayerShot(game, player, dx, dy, dz, opts = {}) {
   s.chain = f.chain || 0;
   s.homing = f.homing || 0;
   s.gravity = 0;
+  s.gravityPull = f.gravity || 0;
   s.burn = f.burn || 0;
   s.freeze = f.freeze || 0;
   s.poison = f.poison || 0;

@@ -428,6 +428,7 @@ export class Game {
       this.torch.inner = 0.6;
       this.torch.outer = 1.05;
     }
+    this.updateTorchBurn(sdt);
 
     // Navigation field: one BFS a few times a second serves every monster.
     this.navTimer -= dt;
@@ -450,6 +451,27 @@ export class Game {
     this.updateDynamicLights();
 
     if (this.player.hp <= 0 && !this.player.dead) this.killPlayer();
+  }
+
+  /**
+   * The "Прожектор" synergy: the beam itself becomes a weapon — anything
+   * caught in the cone is dazzled and scorched.
+   */
+  updateTorchBurn(dt) {
+    if (!this.player.flags.torchBurns) return;
+    if (!this.torch.on || this.torch.charge <= 0.02) return;
+    this.torchBurnT = (this.torchBurnT || 0) - dt;
+    if (this.torchBurnT > 0) return;
+    this.torchBurnT = 0.4;
+    const range = this.torch.range;
+    for (const e of this.enemies) {
+      if (!e.alive || e.dormant || e.hidden) continue;
+      if (dist2dSq(e.x, e.z, this.player.x, this.player.z) > range * range) continue;
+      if (!this.torchLightsPoint(e.x, e.z)) continue;
+      if (!hasLineOfSight(this.dungeon.cells, this.player.x, this.player.z, e.x, e.z, {})) continue;
+      this.applyBurn(e, 1.6, 2.2);
+      e.slow = Math.max(e.slow, 0.6);
+    }
   }
 
   updateTimers(dt) {

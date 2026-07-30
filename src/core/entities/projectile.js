@@ -31,6 +31,8 @@ function makeShot() {
     splitOnHit: 0,
     chain: 0,
     homing: 0,
+    gravityPull: 0,   // drags nearby enemies toward the shot and its impact
+    blackhole: false,
     burn: 0,
     freeze: 0,
     poison: 0,
@@ -43,7 +45,6 @@ function makeShot() {
     shatter: false,
     plague: false,
     spreadBurn: false,
-    seeking: false,
     lightRadius: 0,
 
     sprite: SPRITE.DOT,
@@ -121,6 +122,8 @@ function reset(s) {
   s.splitOnHit = 0;
   s.chain = 0;
   s.homing = 0;
+  s.gravityPull = 0;
+  s.blackhole = false;
   s.burn = 0;
   s.freeze = 0;
   s.poison = 0;
@@ -131,7 +134,6 @@ function reset(s) {
   s.shatter = false;
   s.plague = false;
   s.spreadBurn = false;
-  s.seeking = false;
   s.lightRadius = 0;
   s.sprite = SPRITE.DOT;
   s.r = s.g = s.b = 1;

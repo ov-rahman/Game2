@@ -48,7 +48,7 @@ function stepShot(game, s, dt) {
   if (s.gravity) s.vy -= s.gravity * dt;
 
   if (s.gravityPull && s.team === TEAM.PLAYER) {
-    game.pullEnemiesToward(s.x, s.z, 4, 6 * dt);
+    game.pullEnemiesToward(s.x, s.z, 4, 6 * dt * s.gravityPull);
   }
 
   const slow = s.team === TEAM.ENEMY ? game.enemyShotSlow : 1;
@@ -133,9 +133,17 @@ function stepShot(game, s, dt) {
   }
 }
 
+/** Blow a shot up where it stopped, honouring the named-synergy behaviours. */
+function detonate(game, s, x, y, z, radius, damage) {
+  // A black hole gathers before it goes off — that ordering is the whole point
+  // of the synergy, so it happens here rather than inside explode().
+  if (s.blackhole) game.pullEnemiesToward(x, z, radius * 1.7, 2.6);
+  game.explode(x, y, z, radius, damage, s.team, { napalm: s.napalm });
+}
+
 function impactTerrain(game, s, x, y, z) {
   if (s.explosive) {
-    game.explode(x, y, z, 2.6 + s.explosive * 0.5, s.damage * 1.4, s.team, { napalm: s.napalm });
+    detonate(game, s, x, y, z, 2.6 + s.explosive * 0.5, s.damage * 1.4);
   } else {
     game.fx('wallHit', { x, y, z });
     game.sfx('wallHit', { x, y, z, gain: 0.35 });
@@ -146,7 +154,7 @@ function impactTerrain(game, s, x, y, z) {
 
 function expire(game, s) {
   if (s.explosive) {
-    game.explode(s.x, s.y, s.z, 2.6 + s.explosive * 0.5, s.damage * 1.4, s.team, { napalm: s.napalm });
+    detonate(game, s, s.x, s.y, s.z, 2.6 + s.explosive * 0.5, s.damage * 1.4);
   }
   if (s.puddle) game.spawnPuddle(s.x, s.z, s.puddle);
   game.shots.release(s);
@@ -189,7 +197,18 @@ function hitEnemy(game, s, e) {
     game.sfx('shock', { x: e.x, y: e.y + 1, z: e.z, gain: 0.5 });
   }
 
-  if (s.gravity) game.pullEnemiesToward(s.x, s.z, 5, 2.2);
+  if (s.gravityPull) game.pullEnemiesToward(s.x, s.z, 5, 2.2 * s.gravityPull);
+
+  // Frozen targets struck by a shatter round burst into shrapnel.
+  if (s.shatter && e.frozen > 0 && e.alive) {
+    e.frozen = 0;
+    game.damageEnemy(e, dmg * 0.9, { source: 'shatter', silent: true, trueDamage: true });
+    game.spawnBurst(e.x, e.y + e.height * 0.5, e.z, 6, {
+      speed: 15, damage: dmg * 0.45, team: TEAM.PLAYER, freeze: 0.4,
+      r: 0.7, g: 0.95, b: 1,
+    });
+    game.sfx('shock', { x: e.x, y: e.y + 1, z: e.z, gain: 0.5 });
+  }
 
   if (s.splitOnHit > 0) {
     for (let i = 0; i < s.splitOnHit; i++) {
@@ -220,7 +239,7 @@ function hitEnemy(game, s, e) {
   }
 
   if (s.explosive) {
-    game.explode(s.x, s.y, s.z, 2.8 + s.explosive * 0.6, s.damage * 1.2, s.team, { napalm: s.napalm });
+    detonate(game, s, s.x, s.y, s.z, 2.8 + s.explosive * 0.6, s.damage * 1.2);
     game.shots.release(s);
     return;
   }

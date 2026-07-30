@@ -100,6 +100,13 @@ export function recomputeStats(game, player) {
 
   const ctx = { game, player, stats: s, flags };
   for (const fn of player.inv.hooks.onStats || []) fn(ctx);
+  // Synergies that grant a standing ability rather than changing a volley.
+  // They have to run here: `flags` is rebuilt from scratch on every recompute,
+  // so anything set outside this function is erased the next time the player
+  // takes a hit or a timer expires.
+  for (const syn of player.inv.synergies) {
+    if (syn.passive) syn.passive(ctx);
+  }
 
   // Clamp so no combination can break the game.
   s.maxHp = Math.max(2, Math.round(s.maxHp));
