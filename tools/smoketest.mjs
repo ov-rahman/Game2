@@ -453,9 +453,39 @@ function checkBalance(runs) {
   check(reachedTwo > 0.1, `only ${(reachedTwo * 100).toFixed(0)}% of runs reach floor 2`);
 
   notes.push(
-    `balance         ${runs} runs: avg floor ${avg('floor').toFixed(2)}, `
+    `balance         ${runs} runs on «обычный»: avg floor ${avg('floor').toFixed(2)}, `
     + `${bosses.toFixed(2)} bosses/run, ${avg('kills').toFixed(0)} kills, `
     + `${(avg('seconds') / 60).toFixed(1)} min, reached ${JSON.stringify(hist)}`,
+  );
+}
+
+/**
+ * The three difficulty levels have to actually differ, in the right order.
+ * A setting that does nothing is worse than no setting.
+ */
+function checkDifficulty(runs) {
+  const summary = [];
+  for (const level of ['calm', 'normal', 'deep']) {
+    const rows = [];
+    for (let seed = 1; seed <= runs; seed++) {
+      const g = new Game({ seed });
+      g.settings.difficulty = level;
+      rows.push(playRun(g, seed, { seconds: 900, standoff: 8, explore: seed % 2 === 0 }));
+    }
+    summary.push({
+      level,
+      floor: rows.reduce((a, r) => a + r.floor, 0) / rows.length,
+      bosses: rows.reduce((a, r) => a + r.bosses, 0) / rows.length,
+    });
+  }
+  const [calm, normal, deep] = summary;
+  check(calm.floor > normal.floor && normal.floor > deep.floor,
+    `difficulty levels are not ordered: calm ${calm.floor.toFixed(2)}, `
+    + `normal ${normal.floor.toFixed(2)}, deep ${deep.floor.toFixed(2)}`);
+  check(calm.bosses > deep.bosses * 2,
+    `calm and deep are barely different: ${calm.bosses.toFixed(2)} vs ${deep.bosses.toFixed(2)} bosses/run`);
+  notes.push(
+    `difficulty      ${summary.map((x) => `${x.level} ${x.floor.toFixed(2)}`).join('  ')} (avg floor reached)`,
   );
 }
 
@@ -587,6 +617,7 @@ function runCore() {
   checkSynergyPassives();
   checkMechanics();
   checkMenu();
+  checkDifficulty(QUICK ? 10 : 24);
   checkBosses();
   checkSoftlocks(Math.min(RUNS, 40));
   checkBalance(RUNS);

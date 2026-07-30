@@ -33,6 +33,7 @@ import { ENEMIES } from '../data/enemies.js';
 import { SPRITE } from '../data/sprite-ids.js';
 import { clamp, lerp, dist2d, dist2dSq, angleDelta } from './math3.js';
 import { Menu } from './ui/menu.js';
+import { getDifficulty } from '../data/difficulty.js';
 
 export const STATE = {
   TITLE: 'title',
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS = {
   wobble: true,
   sensitivity: 0.0022,
   invertY: false,
+  difficulty: 'normal',
   master: 0.85,
   music: 0.45,
   sfx: 1,
@@ -127,6 +129,11 @@ export class Game {
     this.events.emit('settingsChanged', { settings: this.settings });
   }
 
+  /** The tuning this run is being played under. */
+  difficulty() {
+    return getDifficulty(this.settings.difficulty);
+  }
+
   freshStats() {
     return {
       kills: 0,
@@ -161,6 +168,7 @@ export class Game {
     this.timeScaleTarget = 1;
 
     this.player = createPlayer(0, 0);
+    this.player.bonusHp = this.difficulty().bonusHp;
     recomputeStats(this, this.player);
     this.player.hp = this.player.stats.maxHp;
     setActive(this.player, this.rng.pick(ACTIVE_IDS));
@@ -231,6 +239,8 @@ export class Game {
       if (room.kind === ROOM_KIND.BOSS) {
         const w = room.world();
         const boss = createBoss(this, def.boss, w.x, w.z);
+        boss.maxHp = Math.max(1, Math.round(boss.maxHp * this.difficulty().enemyHp));
+        boss.hp = boss.maxHp;
         boss.dormant = true;
         this.enemies.push(boss);
         this.boss = boss;
@@ -316,14 +326,16 @@ export class Game {
       spent += cost;
       const spot = this.randomSpotIn(room);
       const e = createEnemy(pick.id, spot.x, spot.z, {
-        hpScale: 1 + (this.floorIndex - 1) * 0.06,
+        hpScale: (1 + (this.floorIndex - 1) * 0.06) * this.difficulty().enemyHp,
       });
       e.homeRoom = room.id;
       this.enemies.push(e);
     }
     if (def.elites && def.elites.length && this.rng.chance(def.eliteChance)) {
       const spot = this.randomSpotIn(room);
-      const e = createEnemy(this.rng.pick(def.elites), spot.x, spot.z, { hpScale: 1 + (this.floorIndex - 1) * 0.08 });
+      const e = createEnemy(this.rng.pick(def.elites), spot.x, spot.z, {
+        hpScale: (1 + (this.floorIndex - 1) * 0.08) * this.difficulty().enemyHp,
+      });
       e.homeRoom = room.id;
       this.enemies.push(e);
     }
@@ -1210,7 +1222,7 @@ export class Game {
       return 0;
     }
 
-    let dmg = Math.max(1, Math.round(amount));
+    let dmg = Math.max(1, Math.round(amount * this.difficulty().incoming));
     if (p.stats.armor > 0) dmg = Math.max(1, dmg - Math.floor(p.stats.armor / 2));
     if (p.flags.glass) dmg = 99;
 

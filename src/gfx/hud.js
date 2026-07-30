@@ -463,6 +463,9 @@ export class HudPainter {
     this.text(`ЭТАЖ ${g.floorIndex}/5  ${g.floorDef ? g.floorDef.name : ''}`, px + 10, py + 12, {
       size: 7, color: '#c8d8c0',
     });
+    this.text(g.difficulty().name, px + pw - 10, py + 12, {
+      size: 6, color: '#7f8c80', align: 'right',
+    });
 
     const rows = [
       ['урон', (st.damage * st.damageMult).toFixed(1)],
@@ -505,10 +508,11 @@ export class HudPainter {
     this.paintRunStats('#a08880', '#e0d0c8');
   }
 
-  /** The four numbers that describe a finished run. */
+  /** The numbers that describe a finished run. */
   paintRunStats(labelColor, valueColor) {
     const s = this.game.stats;
     const rows = [
+      ['сложность', this.game.difficulty().name],
       ['этаж', `${s.floorReached} / 5`],
       ['убийств', String(s.kills)],
       ['предметов', String(s.itemsTaken)],

@@ -18,6 +18,8 @@
  *   note      unselectable text
  */
 
+import { DIFFICULTIES } from '../../data/difficulty.js';
+
 export const ROW_H = 13;
 
 const pct = (v) => `${Math.round(v * 100)}%`;
@@ -28,6 +30,7 @@ const pct = (v) => `${Math.round(v * 100)}%`;
  */
 function buildScreens(game) {
   const s = game.settings;
+  const difficultyOptions = DIFFICULTIES.map((d) => ({ value: d.id, label: d.name }));
   const cmd = (name, payload) => () => game.events.emit('uiCommand', { name, ...payload });
   const changed = () => game.events.emit('settingsChanged', { settings: s });
 
@@ -46,6 +49,12 @@ function buildScreens(game) {
       subtitle: 'спуск на пять этажей',
       rows: [
         { kind: 'action', label: 'НАЧАТЬ СПУСК', run: cmd('newRun') },
+        {
+          kind: 'choice',
+          label: 'сложность',
+          options: difficultyOptions,
+          ...setting('difficulty'),
+        },
         { kind: 'submenu', label: 'НАСТРОЙКИ', screen: 'settings' },
         { kind: 'submenu', label: 'УПРАВЛЕНИЕ', screen: 'controls' },
       ],
@@ -81,6 +90,12 @@ function buildScreens(game) {
     settings: {
       title: 'НАСТРОЙКИ',
       rows: [
+        {
+          kind: 'choice',
+          label: 'сложность',
+          options: difficultyOptions,
+          ...setting('difficulty'),
+        },
         {
           kind: 'slider',
           label: 'сила фильтра',
