@@ -44,6 +44,26 @@ export function blocked(cells, x, z, r, opts = {}) {
 }
 
 /**
+ * Nearest position outside solid geometry, searched as a deterministic
+ * outward spiral. Deterministic matters: two identical runs must not diverge
+ * because one of them clipped a wall.
+ */
+export function escapeGeometry(cells, x, z, r, opts = {}) {
+  if (!blocked(cells, x, z, r, opts)) return { x, z, moved: false };
+  const STEPS = 12;
+  for (let ring = 1; ring <= 10; ring++) {
+    const d = ring * (CELL * 0.25);
+    for (let i = 0; i < STEPS; i++) {
+      const a = (i / STEPS) * Math.PI * 2;
+      const nx = x + Math.cos(a) * d;
+      const nz = z + Math.sin(a) * d;
+      if (!blocked(cells, nx, nz, r, opts)) return { x: nx, z: nz, moved: true };
+    }
+  }
+  return { x, z, moved: false };
+}
+
+/**
  * Move a body by (dx,dz), sliding along whatever it hits.
  * Mutates body.x / body.z. Returns which axes were blocked.
  */
@@ -51,6 +71,20 @@ export function moveBody(cells, body, dx, dz, opts = {}) {
   const r = body.radius;
   let hitX = false;
   let hitZ = false;
+
+  // A body that is already inside geometry can never move again: every probe
+  // it makes is blocked, so it freezes there for the rest of the run. Shoves,
+  // teleports and knockback can all put it there, so the recovery lives here
+  // rather than at each of those call sites.
+  if (blocked(cells, body.x, body.z, r, opts)) {
+    const free = escapeGeometry(cells, body.x, body.z, r, opts);
+    body.x = free.x;
+    body.z = free.z;
+    if (body.px != null) {
+      body.px = free.x;
+      body.pz = free.z;
+    }
+  }
 
   if (dx !== 0) {
     const nx = body.x + dx;

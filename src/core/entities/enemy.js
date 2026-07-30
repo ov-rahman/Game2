@@ -152,15 +152,19 @@ export function updateStatus(game, e, dt) {
     }
   }
 
-  // Standing in lava hurts monsters too, unless they live in it.
+  // Standing in the floor's hazard hurts monsters too, unless they live in it.
   if (!e.flying && !e.lavaImmune) {
     const cell = cellAtWorld(game.dungeon.cells, e.x, e.z);
     if (cell === C.HAZARD) {
-      e.hazardAccum = (e.hazardAccum || 0) + dt * 4;
+      const dps = (game.floorDef.hazard && game.floorDef.hazard.enemyDps) || 8;
+      e.hazardAccum = (e.hazardAccum || 0) + dt * dps;
       if (e.hazardAccum >= 1) {
-        e.hazardAccum = 0;
-        game.damageEnemy(e, 3, { source: 'hazard', silent: true, trueDamage: true });
+        const n = Math.floor(e.hazardAccum);
+        e.hazardAccum -= n;
+        game.damageEnemy(e, n, { source: 'hazard', silent: true, trueDamage: true });
       }
+    } else {
+      e.hazardAccum = 0;
     }
   }
 }

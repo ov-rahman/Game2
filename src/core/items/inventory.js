@@ -87,6 +87,9 @@ export function setActive(player, id) {
 export function recomputeStats(game, player) {
   const s = Object.assign({}, BASE_STATS);
   const flags = Object.create(null);
+  // Health earned by killing floor owners, kept outside the item system so it
+  // survives every recompute.
+  s.maxHp += player.bonusHp || 0;
 
   for (const id of player.inv.items) {
     const it = ITEMS[id];

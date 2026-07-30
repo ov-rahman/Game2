@@ -26,6 +26,9 @@ export const FLOORS = [
     wideCorridors: 0.35,
     special: { treasure: 1, shop: 1, challenge: 1 },
 
+    // Brambles: they hold you more than they hurt you.
+    hazard: { damage: 1, interval: 1.0, slow: 0.55, enemyDps: 5 },
+
     tex: {
       floor: '#4a5f38',
       wall: '#5c5340',
@@ -85,6 +88,8 @@ export const FLOORS = [
     pits: true,
     wideCorridors: 0.22,
     special: { treasure: 1, shop: 1, challenge: 1 },
+
+    hazard: { damage: 1, interval: 0.85, slow: 0.6, enemyDps: 6 },
 
     tex: {
       floor: '#26404f',
@@ -146,6 +151,8 @@ export const FLOORS = [
     wideCorridors: 0.3,
     special: { treasure: 1, shop: 1, challenge: 1 },
 
+    hazard: { damage: 1, interval: 0.7, slow: 0.75, enemyDps: 9 },
+
     tex: {
       floor: '#4a3328',
       wall: '#5a3524',
@@ -201,10 +208,13 @@ export const FLOORS = [
 
     rooms: { min: 12, max: 15 },
     roomSize: { min: 6, max: 13 },
-    hazardChance: 0.62,
+    hazardChance: 0.5,
     pits: false,
     wideCorridors: 0.4,
     special: { treasure: 1, shop: 1, challenge: 1 },
+
+    // Actual lava. Crossing it is a decision, not a shortcut.
+    hazard: { damage: 1, interval: 0.5, slow: 0.62, enemyDps: 14 },
 
     tex: {
       floor: '#3d2620',
@@ -268,6 +278,8 @@ export const FLOORS = [
 
     // The bright, many-coloured floor: a crystal treasury lit by refracted light.
     rainbow: true,
+    hazard: { damage: 1, interval: 0.8, slow: 0.7, enemyDps: 8 },
+
     tex: {
       floor: '#3b2c6b',
       wall: '#42307a',

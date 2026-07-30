@@ -16,9 +16,9 @@ export function createLeshy(game, x, z) {
     art: 'leshy',
     x, z,
     radius: 1.5,
-    hp: 900,
+    hp: 480,
     speed: 2.4,
-    touch: 3,
+    touch: 2,
     phaseThresholds: [0.62, 0.3],
     update,
   });

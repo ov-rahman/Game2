@@ -21,7 +21,7 @@ import { Rng } from './rng.js';
 import { EventBus } from './events.js';
 import { generateDungeon, ROOM_KIND, cellAtWorld, roomAtWorld } from './world/dungeongen.js';
 import { NavField } from './world/nav.js';
-import { blocked, findFreeSpot, hasLineOfSight, raycast } from './world/collision.js';
+import { blocked, findFreeSpot, hasLineOfSight, moveBody, raycast } from './world/collision.js';
 import { ShotPool } from './entities/projectile.js';
 import { createEnemy, updateEnemy } from './entities/enemy.js';
 import { createPlayer, updatePlayer, aimDirection } from './entities/player.js';
@@ -44,6 +44,11 @@ export const STATE = {
 };
 
 const NAV_INTERVAL = 0.22;
+
+/** Seconds without taking a hit before the player starts patching up. */
+const REGEN_DELAY = 11;
+/** Seconds per point regained, up to half of maximum health. */
+const REGEN_INTERVAL = 5;
 
 export class Game {
   constructor(opts = {}) {
@@ -216,6 +221,12 @@ export class Game {
         boss.dormant = true;
         this.enemies.push(boss);
         this.boss = boss;
+        // A supply cache inside the lair. Arriving at a boss on two health
+        // after fighting across the whole floor is a coin flip, not a fight.
+        const edge = Math.min(room.w, room.h) * CELL * 0.32;
+        this.addProp({ type: 'pickup', kind: 'heal', x: w.x - edge, z: w.z - edge });
+        this.addProp({ type: 'pickup', kind: 'heal', x: w.x + edge, z: w.z - edge });
+        this.addProp({ type: 'pickup', kind: 'battery', x: w.x - edge, z: w.z + edge });
         continue;
       }
 
@@ -242,9 +253,12 @@ export class Game {
         continue;
       }
 
-      // Normal / challenge rooms get a monster budget scaled by distance.
-      const mul = room.kind === ROOM_KIND.CHALLENGE ? 1.9 : 1;
-      const budget = (1.4 + room.depth * 0.55) * def.difficulty * mul;
+      // Normal / challenge rooms get a monster budget scaled by distance from
+      // spawn. The scaling is capped: uncapped, the far side of a floor held
+      // three times the garrison of the near side and the run became a war of
+      // attrition nobody could finish.
+      const mul = room.kind === ROOM_KIND.CHALLENGE ? 1.8 : 1;
+      const budget = (1.2 + Math.min(room.depth, 5) * 0.45) * def.difficulty * mul;
       this.spawnPack(room, budget);
 
       if (room.kind === ROOM_KIND.CHALLENGE) {
@@ -255,7 +269,7 @@ export class Game {
       // Scattered loot.
       if (this.rng.chance(0.55)) {
         const spot = this.randomSpotIn(room);
-        this.addProp({ type: 'pickup', kind: this.rng.pick(['shard', 'shard', 'heal', 'battery']), x: spot.x, z: spot.z });
+        this.addProp({ type: 'pickup', kind: this.rng.pick(['shard', 'heal', 'heal', 'battery']), x: spot.x, z: spot.z });
       }
     }
 
@@ -451,6 +465,7 @@ export class Game {
       if (this.packToken.t <= 0 || !this.packToken.holder.alive) this.packToken.holder = null;
     }
 
+    this.updateRegen(dt);
     this.updateEnemies(sdt);
     updateShots(this, sdt);
     updateAreas(this, sdt);
@@ -482,6 +497,27 @@ export class Game {
       this.applyBurn(e, 1.6, 2.2);
       e.slow = Math.max(e.slow, 0.6);
     }
+  }
+
+  /**
+   * Catching your breath. Out of combat the player slowly patches themselves
+   * up, but only to half health — enough that one bad room does not doom a
+   * run, not enough to replace medkits or to make a fight survivable by
+   * standing still in it.
+   */
+  updateRegen(dt) {
+    const p = this.player;
+    if (p.dead || p.hp >= p.stats.maxHp) return;
+    p.calmT = (p.calmT || 0) + dt;
+    if (p.calmT < REGEN_DELAY) return;
+    const cap = Math.max(1, Math.ceil(p.stats.maxHp * 0.5));
+    if (p.hp >= cap) return;
+    p.regenT = (p.regenT || 0) + dt;
+    if (p.regenT < REGEN_INTERVAL) return;
+    p.regenT = 0;
+    p.hp = Math.min(cap, p.hp + 1);
+    p.statsDirty = true;
+    this.fx('heal', { x: p.x, y: p.y + 1, z: p.z });
   }
 
   updateTimers(dt) {
@@ -543,13 +579,22 @@ export class Game {
     const rr = p.radius + e.radius;
     if (dist2dSq(p.x, p.z, e.x, e.z) > rr * rr) return;
     if (p.y + p.height < e.y || p.y > e.y + e.height) return;
-    e.contactCd = 0.8;
+    // Bosses are big, slow and always adjacent: without a longer gap between
+    // body hits a boss fight is decided by who is standing where, not by
+    // reading its telegraphs.
+    e.contactCd = e.isBoss ? 1.7 : 1.15;
     this.damagePlayer(e.touch, { source: 'contact', enemy: e });
     runHook(p, 'onContact', { game: this, player: p, enemy: e });
-    // Push apart so contact damage cannot machine-gun.
+    // Shove both bodies apart. Walking into a monster has to cost something,
+    // but a crowd should never be able to chain-tap the player to death. The
+    // shove goes through collision: an unchecked one buries the player in a
+    // wall, and a buried body can never move again.
     const a = Math.atan2(p.x - e.x, p.z - e.z);
-    p.x += Math.sin(a) * 0.4;
-    p.z += Math.cos(a) * 0.4;
+    moveBody(this.dungeon.cells, p, Math.sin(a) * 0.5, Math.cos(a) * 0.5, {});
+    if (!e.isBoss) {
+      e.vx -= Math.sin(a) * 4;
+      e.vz -= Math.cos(a) * 4;
+    }
   }
 
   updateStrikes(dt) {
@@ -577,7 +622,10 @@ export class Game {
       const prop = this.props[i];
       const d = dist2d(prop.x, prop.z, p.x, p.z);
       if (prop.type === 'pickup') {
-        if (d < range) {
+        // Vacuuming a medkit up at full health throws it away. Leave anything
+        // the player cannot use on the floor so they can come back for it —
+        // this is most of the run's healing budget.
+        if (d < range && this.pickupUseful(prop)) {
           this.collectPickup(prop);
           this.props.splice(i, 1);
         }
@@ -611,6 +659,13 @@ export class Game {
     this.interactPressed = false;
   }
 
+  /** Would picking this up actually do anything right now? */
+  pickupUseful(prop) {
+    if (prop.kind === 'heal') return this.player.hp < this.player.stats.maxHp;
+    if (prop.kind === 'battery') return this.torch.charge < 0.92;
+    return true;
+  }
+
   /** Prompt for one interactable and act on it if E was pressed this tick. */
   offerProp(prop) {
     const p = this.player;
@@ -640,7 +695,7 @@ export class Game {
     p.coins -= price;
     this.removeProp(prop);
     if (prop.kind === 'item') this.grantItem(prop.itemId);
-    else if (prop.kind === 'heal') this.healPlayer(4);
+    else if (prop.kind === 'heal') this.healPlayer(Math.max(4, Math.round(p.stats.maxHp * 0.55)));
     else {
       this.torch.charge = 1;
       this.sfx('reloadTorch');
@@ -796,7 +851,15 @@ export class Game {
       this.dungeon.stairs.active = true;
       this.bossActive = false;
       this.objective = 'лестница открыта';
-      this.message('ПУТЬ ВНИЗ ОТКРЫТ', '', 3);
+      // Killing a floor's owner is the one guaranteed step-up in the run. The
+      // item pools are random, so without this the player's health never grows
+      // while the monsters' does, and floor 5 is unsurvivable by construction.
+      this.player.bonusHp = (this.player.bonusHp || 0) + 2;
+      this.player.statsDirty = true;
+      recomputeStats(this, this.player);
+      this.player.hp = this.player.stats.maxHp;
+      this.message('ПУТЬ ВНИЗ ОТКРЫТ', '+2 к здоровью, раны затянулись', 3.4);
+
       // Boss reward. A big boss dies where it stood, which can be against a
       // wall, so the pedestal has to be placed on ground that exists.
       const spot = findFreeSpot(this.dungeon.cells, e.x + 2, e.z, 0.6, this.rng);
@@ -836,7 +899,7 @@ export class Game {
       const luck = this.player.stats.luck;
       const chance = (e.elite ? 0.7 : 0.2) + luck * 0.02;
       if (this.rng.chance(chance)) {
-        this.dropPickup(e.x, e.z, this.rng.pick(['shard', 'shard', 'shard', 'heal', 'battery']));
+        this.dropPickup(e.x, e.z, this.rng.pick(['shard', 'shard', 'shard', 'heal', 'heal', 'battery']));
       }
     }
 
@@ -849,9 +912,26 @@ export class Game {
       if (room && !room.cleared) {
         room.cleared = true;
         this.stats.roomsCleared++;
+        this.rewardRoom(room, e);
         runHook(this.player, 'onRoomClear', { game: this, player: this.player, room });
       }
     }
+  }
+
+  /**
+   * Emptying a room is the game's unit of progress, so it has to pay. Without
+   * this the only healing on a floor is whatever the generator happened to
+   * scatter, and attrition kills every run regardless of how well it is played.
+   */
+  rewardRoom(room, lastKill) {
+    const x = lastKill ? lastKill.x : room.world().x;
+    const z = lastKill ? lastKill.z : room.world().z;
+    this.sfx('confirm', { gain: 0.5 });
+    this.dropPickup(x, z, 'shard');
+    const luck = this.player.stats.luck || 0;
+    if (this.rng.chance(0.45 + luck * 0.03)) this.dropPickup(x + 0.8, z, 'heal');
+    if (this.rng.chance(0.3)) this.dropPickup(x - 0.8, z, 'battery');
+    if (room.kind === ROOM_KIND.CHALLENGE) this.dropPickup(x, z + 0.8, 'heal');
   }
 
   damageEnemiesNear(x, z, radius, amount, source, stun = 0) {
@@ -877,8 +957,8 @@ export class Game {
       const dz = z - e.z;
       const d = Math.hypot(dx, dz);
       if (d > radius || d < 0.1) continue;
-      e.x += (dx / d) * force * (1 - d / radius);
-      e.z += (dz / d) * force * (1 - d / radius);
+      const k = force * (1 - d / radius);
+      moveBody(this.dungeon.cells, e, (dx / d) * k, (dz / d) * k, { flying: e.flying });
     }
   }
 
@@ -1071,6 +1151,8 @@ export class Game {
     }
     p.invuln = 0.75;
     p.hurtFlash = 0.85;
+    p.calmT = 0;
+    p.regenT = 0;
     p.statsDirty = true;
     this.sfx('hurt');
     this.shake(1.1, 0.35, 0.4);
@@ -1128,7 +1210,7 @@ export class Game {
         this.sfx('coin');
         break;
       case 'heal':
-        this.healPlayer(3);
+        this.healPlayer(Math.max(4, Math.round(this.player.stats.maxHp * 0.5)));
         break;
       case 'battery':
         this.torch.charge = Math.min(1, this.torch.charge + 0.45);
