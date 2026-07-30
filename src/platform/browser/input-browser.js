@@ -1,5 +1,5 @@
 /**
- * Browser input: pointer-lock mouse look, keyboard, gamepad.
+ * Browser input: pointer-lock mouse look, keyboard, gamepad, touch.
  *
  * Everything host-specific about controls lives here. The core only ever sees
  * the neutral snapshot from ../interfaces.js, so a desktop shell can feed it
@@ -7,6 +7,7 @@
  */
 import { ACTIONS } from '../interfaces.js';
 import { RENDER_W, RENDER_H } from '../../core/constants.js';
+import { createTouchUi } from './touchui-browser.js';
 
 const KEYMAP = {
   KeyW: 'forward',
@@ -72,6 +73,12 @@ const STICK_OFF = 0.35;
 
 const DEADZONE = 0.22;
 
+/** Left slice of the screen is the movement stick; the rest turns the camera. */
+const TOUCH_STICK_ZONE = 0.45;
+/** Finger travel, in CSS pixels, that means full deflection. */
+const TOUCH_STICK_RADIUS = 54;
+const TOUCH_LOOK_SENS = 0.005;
+
 export function createBrowserInput(canvas, opts = {}) {
   const down = Object.create(null);
   const pressed = Object.create(null);
@@ -95,6 +102,14 @@ export function createBrowserInput(canvas, opts = {}) {
   const cursor = { x: 0, y: 0, active: false };
   let stickArmedX = true;
   let stickArmedY = true;
+
+  // Touch. The on-screen buttons are DOM (see touchui-browser.js); the stick and
+  // the look drag are read straight off the canvas here.
+  let touchUi = null;
+  let touchSeen = false;
+  const moveTouch = { id: null, ox: 0, oy: 0, x: 0, z: 0 };
+  const lookTouch = { id: null, lx: 0, ly: 0 };
+  let tapTouch = null;
 
   const snapshot = {
     move: { x: 0, z: 0 },
@@ -135,6 +150,15 @@ export function createBrowserInput(canvas, opts = {}) {
 
   function onBlur() {
     for (const a of ACTIONS) down[a] = false;
+    if (touchUi) {
+      touchUi.clearLatched();
+      touchUi.hideStick();
+    }
+    moveTouch.id = null;
+    moveTouch.x = 0;
+    moveTouch.z = 0;
+    lookTouch.id = null;
+    tapTouch = null;
   }
 
   function onMouseMove(e) {
@@ -194,6 +218,96 @@ export function createBrowserInput(canvas, opts = {}) {
     e.preventDefault();
   }
 
+  /**
+   * The overlay only exists once a real finger has shown up, so a desktop
+   * browser never grows a set of thumb buttons it has no use for.
+   */
+  function ensureTouchUi() {
+    if (touchUi) return;
+    touchSeen = true;
+    touchUi = createTouchUi(canvas, { onAction: setAction });
+    touchUi.setVisible(wantLock);
+  }
+
+  function cursorFromTouch(t, rect) {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    cursor.x = ((t.clientX - rect.left) / rect.width) * RENDER_W;
+    cursor.y = ((t.clientY - rect.top) / rect.height) * RENDER_H;
+    cursor.active = true;
+  }
+
+  function onTouchStart(e) {
+    ensureTouchUi();
+    const rect = canvas.getBoundingClientRect();
+    for (const t of e.changedTouches) {
+      // While a menu is up the canvas is one big button: a tap is a click
+      // wherever the HUD drew the row.
+      if (!wantLock) {
+        cursorFromTouch(t, rect);
+        setAction('click', true);
+        tapTouch = t.identifier;
+        continue;
+      }
+      cursor.active = false;
+      if (moveTouch.id === null && t.clientX - rect.left < rect.width * TOUCH_STICK_ZONE) {
+        moveTouch.id = t.identifier;
+        moveTouch.ox = t.clientX;
+        moveTouch.oy = t.clientY;
+        moveTouch.x = 0;
+        moveTouch.z = 0;
+        touchUi.showStick(t.clientX - rect.left, t.clientY - rect.top);
+      } else if (lookTouch.id === null) {
+        lookTouch.id = t.identifier;
+        lookTouch.lx = t.clientX;
+        lookTouch.ly = t.clientY;
+      }
+    }
+    e.preventDefault();
+  }
+
+  function onTouchMove(e) {
+    const rect = canvas.getBoundingClientRect();
+    for (const t of e.changedTouches) {
+      if (t.identifier === tapTouch) {
+        cursorFromTouch(t, rect);
+      } else if (t.identifier === moveTouch.id) {
+        let dx = (t.clientX - moveTouch.ox) / TOUCH_STICK_RADIUS;
+        let dz = (t.clientY - moveTouch.oy) / TOUCH_STICK_RADIUS;
+        const len = Math.hypot(dx, dz);
+        if (len > 1) {
+          dx /= len;
+          dz /= len;
+        }
+        moveTouch.x = dx;
+        moveTouch.z = dz;
+        touchUi.moveKnob(dx * TOUCH_STICK_RADIUS, dz * TOUCH_STICK_RADIUS);
+      } else if (t.identifier === lookTouch.id) {
+        lookX += (t.clientX - lookTouch.lx) * TOUCH_LOOK_SENS;
+        lookY += (t.clientY - lookTouch.ly) * TOUCH_LOOK_SENS * (invertY ? -1 : 1);
+        lookTouch.lx = t.clientX;
+        lookTouch.ly = t.clientY;
+      }
+    }
+    e.preventDefault();
+  }
+
+  function onTouchEnd(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === tapTouch) {
+        tapTouch = null;
+        setAction('click', false);
+      } else if (t.identifier === moveTouch.id) {
+        moveTouch.id = null;
+        moveTouch.x = 0;
+        moveTouch.z = 0;
+        if (touchUi) touchUi.hideStick();
+      } else if (t.identifier === lookTouch.id) {
+        lookTouch.id = null;
+      }
+    }
+    e.preventDefault();
+  }
+
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
@@ -203,6 +317,10 @@ export function createBrowserInput(canvas, opts = {}) {
   canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);
   document.addEventListener('pointerlockchange', onLockChange);
+  canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+  canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+  canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+  canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
   function pollGamepad() {
     if (!navigator.getGamepads) return { mx: 0, mz: 0, lx: 0, ly: 0, connected: false };
@@ -250,8 +368,8 @@ export function createBrowserInput(canvas, opts = {}) {
 
       let mx = (down.right ? 1 : 0) - (down.left ? 1 : 0);
       let mz = (down.back ? 1 : 0) - (down.forward ? 1 : 0);
-      mx += pad.mx;
-      mz += pad.mz;
+      mx += pad.mx + moveTouch.x;
+      mz += pad.mz + moveTouch.z;
       const len = Math.hypot(mx, mz);
       if (len > 1) {
         mx /= len;
@@ -296,9 +414,19 @@ export function createBrowserInput(canvas, opts = {}) {
       for (const a of ACTIONS) pressed[a] = false;
     },
 
-    /** Tell the adapter whether gameplay wants the pointer captured. */
+    /**
+     * Tell the adapter whether gameplay wants the pointer captured. On touch
+     * this is also what decides who owns the screen: the thumb controls during
+     * a run, or the menu underneath them.
+     */
     setLockWanted(v) {
       wantLock = !!v;
+      if (touchUi) touchUi.setVisible(wantLock);
+    },
+
+    /** True once the player has touched the screen at least once. */
+    isTouch() {
+      return touchSeen;
     },
 
     lockWanted() {
@@ -307,7 +435,11 @@ export function createBrowserInput(canvas, opts = {}) {
 
     requestLock() {
       wantLock = true;
+      if (touchUi) touchUi.setVisible(true);
       if (locked) return;
+      // A finger has nothing to lock, and iPhone Safari has no pointer-lock API
+      // at all — calling it there would throw and take the run start with it.
+      if (touchSeen || typeof canvas.requestPointerLock !== 'function') return;
       const p = canvas.requestPointerLock({ unadjustedMovement: true });
       // Chrome returns a promise; older engines return undefined.
       if (p && typeof p.catch === 'function') {
@@ -323,6 +455,7 @@ export function createBrowserInput(canvas, opts = {}) {
 
     releaseLock() {
       wantLock = false;
+      if (touchUi) touchUi.setVisible(false);
       if (document.exitPointerLock) document.exitPointerLock();
     },
 
@@ -352,6 +485,11 @@ export function createBrowserInput(canvas, opts = {}) {
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContextMenu);
       document.removeEventListener('pointerlockchange', onLockChange);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      canvas.removeEventListener('touchend', onTouchEnd);
+      canvas.removeEventListener('touchcancel', onTouchEnd);
+      if (touchUi) touchUi.dispose();
     },
   };
 

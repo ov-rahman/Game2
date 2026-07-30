@@ -74,3 +74,133 @@ canvas#game {
   color: #e08070;
   font-size: 14px;
 }
+
+/* Touch controls. Built by src/platform/browser/touchui-browser.js and only
+   attached once a finger has actually touched the screen. */
+
+.touch-ui {
+  position: absolute;
+  inset: 0;
+  /* Only the controls themselves take input; the rest falls through to the
+     canvas, which is what drives the look drag and the movement stick. */
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  z-index: 5;
+}
+
+.touch-ui[hidden] {
+  display: none;
+}
+
+.tc-group {
+  position: absolute;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Lifted clear of the HUD strip the canvas draws along the bottom edge. */
+.tc-act {
+  right: max(14px, env(safe-area-inset-right));
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 11%);
+  flex-direction: row-reverse;
+}
+
+/* Kept clear of the bottom-left corner: that is where the movement thumb
+   rests, and a button there would swallow the stick. */
+.tc-mod {
+  left: max(14px, env(safe-area-inset-left));
+  bottom: 42%;
+  flex-direction: column;
+}
+
+.tc-sys {
+  right: max(14px, env(safe-area-inset-right));
+  top: max(12px, env(safe-area-inset-top));
+}
+
+.tc-btn {
+  pointer-events: auto;
+  width: 62px;
+  height: 62px;
+  padding: 0;
+  border: 1px solid #4d6154;
+  border-radius: 50%;
+  background: rgba(10, 16, 12, 0.55);
+  color: #9fb0a0;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 1px;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tc-btn.on {
+  background: rgba(120, 190, 140, 0.35);
+  border-color: #a8d8b4;
+  color: #e2f0e2;
+}
+
+.tc-fire {
+  width: 92px;
+  height: 92px;
+  font-size: 12px;
+  border-color: #7d5850;
+  background: rgba(40, 16, 12, 0.55);
+  color: #d8a898;
+}
+
+.tc-sys .tc-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  font-size: 9px;
+}
+
+/* The stick ring parks itself wherever the thumb lands in the left zone. */
+.tc-stick {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 116px;
+  height: 116px;
+  margin: -58px 0 0 -58px;
+  border: 1px solid #3f5346;
+  border-radius: 50%;
+  background: rgba(10, 16, 12, 0.35);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.tc-stick.on {
+  opacity: 1;
+}
+
+.tc-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: rgba(150, 190, 160, 0.35);
+  transform: translate(-50%, -50%);
+}
+
+/* Anything short enough to be a phone in landscape gets smaller thumb targets,
+   so the buttons stop eating the view. */
+@media (max-height: 460px) {
+  .tc-btn {
+    width: 52px;
+    height: 52px;
+    font-size: 9px;
+  }
+
+  .tc-fire {
+    width: 74px;
+    height: 74px;
+    font-size: 10px;
+  }
+}
