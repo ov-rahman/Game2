@@ -6,7 +6,7 @@
  * grain and scanlines as the world instead of floating cleanly on top of it.
  * That single decision is most of why the overlay reads as part of the image.
  */
-import { RENDER_W, RENDER_H } from '../core/constants.js';
+import { RENDER_W, RENDER_H, CELL } from '../core/constants.js';
 import { STATE } from '../core/game.js';
 import { ROW_H } from '../core/ui/menu.js';
 import { clamp } from '../core/math3.js';
@@ -131,10 +131,7 @@ export class HudPainter {
         this.text('›', cx - 9, ry + 8, { size: 8, color: '#d8c88a' });
       }
 
-      const label = row.kind === 'action' || row.kind === 'submenu' || row.kind === 'back'
-        ? row.label
-        : row.label;
-      this.text(label, cx, ry + 8, {
+      this.text(row.label, cx, ry + 8, {
         size: 7,
         color: on ? '#f0efd8' : '#a8b8a8',
       });
@@ -242,15 +239,15 @@ export class HudPainter {
       );
     }
 
-    // --- floor label ------------------------------------------------------
+    // --- floor label and objective ---------------------------------------
+    // Stacked on the left rather than one centred and one left-aligned: the
+    // longest floor name runs straight through a centred objective line.
     const def = g.floorDef;
     if (def) {
       this.text(`${def.index}/5  ${def.name}`, 10, 14, { size: 7, color: '#8fa898' });
     }
-
-    // --- objective --------------------------------------------------------
     if (g.objective) {
-      this.text(g.objective, RENDER_W / 2, 14, { align: 'center', size: 7, color: '#c8b878' });
+      this.text(g.objective, 10, 23, { size: 6, color: '#c8b878' });
     }
 
     // --- boss bar ---------------------------------------------------------
@@ -319,41 +316,82 @@ export class HudPainter {
     const g = this.game;
     const d = g.dungeon;
     if (!d) return;
-    const scale = 2;
-    const w = d.width * scale;
-    const h = d.height * scale;
-    const ox = (RENDER_W - w) / 2;
-    const oy = (RENDER_H - h) / 2;
 
-    ctx.fillStyle = 'rgba(4,6,5,0.86)';
+    ctx.fillStyle = 'rgba(4,6,5,0.92)';
     ctx.fillRect(0, 0, RENDER_W, RENDER_H);
 
-    for (const room of d.rooms) {
-      if (!room.seen) continue;
-      ctx.fillStyle =
-        room.kind === 'boss' ? 'rgba(200,70,60,0.75)'
-        : room.kind === 'shop' ? 'rgba(90,180,220,0.7)'
-        : room.kind === 'treasure' ? 'rgba(220,190,90,0.7)'
-        : 'rgba(120,150,130,0.55)';
-      ctx.fillRect(ox + room.x * scale, oy + room.y * scale, room.w * scale, room.h * scale);
+    // Fit the part of the grid the level actually occupies, not the whole
+    // 56x56 array — most of it is untouched rock, and scaling to it left the
+    // map as a thumbnail in the middle of an empty screen.
+    let minX = d.width;
+    let minY = d.height;
+    let maxX = 0;
+    let maxY = 0;
+    for (const r of d.rooms) {
+      minX = Math.min(minX, r.x - 1);
+      minY = Math.min(minY, r.y - 1);
+      maxX = Math.max(maxX, r.x + r.w + 1);
+      maxY = Math.max(maxY, r.y + r.h + 1);
     }
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    const boxW = RENDER_W - 40;
+    const boxH = RENDER_H - 46;
+    const scale = Math.max(2, Math.floor(Math.min(boxW / spanX, boxH / spanY)));
+    const ox = Math.round((RENDER_W - spanX * scale) / 2 - minX * scale);
+    const oy = Math.round((RENDER_H - spanY * scale) / 2 - minY * scale + 4);
+
     // Corridors the player has actually walked.
-    ctx.fillStyle = 'rgba(90,110,100,0.5)';
+    ctx.fillStyle = 'rgba(86,104,94,0.6)';
     for (const c of g.exploredCells) {
       const gx = c % d.width;
       const gy = (c / d.width) | 0;
       ctx.fillRect(ox + gx * scale, oy + gy * scale, scale, scale);
     }
 
-    const p = g.player;
-    ctx.fillStyle = '#e8f0d8';
-    ctx.fillRect(ox + (p.x / 4) * scale - 1, oy + (p.z / 4) * scale - 1, 3, 3);
-
-    if (d.stairs.active) {
-      ctx.fillStyle = '#8fe8b0';
-      ctx.fillRect(ox + d.stairs.gx * scale - 1, oy + d.stairs.gy * scale - 1, 3, 3);
+    for (const room of d.rooms) {
+      if (!room.seen) continue;
+      ctx.fillStyle =
+        room.kind === 'boss' ? 'rgba(200,70,60,0.8)'
+        : room.kind === 'shop' ? 'rgba(90,180,220,0.75)'
+        : room.kind === 'treasure' ? 'rgba(220,190,90,0.75)'
+        : room.kind === 'challenge' ? 'rgba(180,120,220,0.7)'
+        : 'rgba(120,150,130,0.6)';
+      ctx.fillRect(ox + room.x * scale, oy + room.y * scale, room.w * scale, room.h * scale);
+      if (room.cleared) {
+        ctx.strokeStyle = 'rgba(220,240,210,0.35)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(ox + room.x * scale + 0.5, oy + room.y * scale + 0.5,
+          room.w * scale - 1, room.h * scale - 1);
+      }
     }
-    this.text('КАРТА  —  TAB', RENDER_W / 2, oy - 8, { align: 'center', size: 7, color: '#8fa898' });
+
+    // The way down, once it is open.
+    const st = d.stairs;
+    if (st.active) {
+      const sx = ox + st.gx * scale;
+      const sy = oy + st.gy * scale;
+      ctx.fillStyle = '#8fe8b0';
+      ctx.fillRect(sx - 1, sy - 1, scale + 2, scale + 2);
+    }
+
+    // Player position and facing: a dot alone does not tell you which way you
+    // are pointing, which is the one thing a map in a dark game is for.
+    const p = g.player;
+    const px = ox + (p.x / CELL) * scale;
+    const py = oy + (p.z / CELL) * scale;
+    ctx.fillStyle = '#e8f0d8';
+    ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+    ctx.strokeStyle = '#e8f0d8';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + Math.sin(p.yaw) * scale * 1.6, py + Math.cos(p.yaw) * scale * 1.6);
+    ctx.stroke();
+
+    this.text('КАРТА  —  TAB', RENDER_W / 2, 12, { align: 'center', size: 7, color: '#8fa898' });
+    const legend = st.active ? 'зелёное — лестница' : 'красное — логово';
+    this.text(legend, RENDER_W / 2, RENDER_H - 6, { align: 'center', size: 6, color: '#6f7a68' });
   }
 
   paintDebug() {

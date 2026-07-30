@@ -34,7 +34,7 @@ import { FLOORS } from '../src/data/floors.js';
 import { ITEMS, ITEM_IDS, ACTIVE_IDS } from '../src/data/items.js';
 import { SYNERGIES } from '../src/data/synergies.js';
 import { ENEMIES } from '../src/data/enemies.js';
-import { GRID_W, GRID_H, CELL, C } from '../src/core/constants.js';
+import { GRID_W, GRID_H, C } from '../src/core/constants.js';
 import { Bot, playRun } from './bot.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -416,7 +416,10 @@ function checkBosses() {
     check(spawned === trials, `floor ${floor}: boss missing on ${trials - spawned} of ${trials} seeds`);
     // A randomised move set against a mediocre bot will not fall every time;
     // what must hold is that the fight is winnable and paced like a fight.
-    check(killed * 2 >= trials,
+    // With only a handful of trials (--quick) the kill rate is noise, so all
+    // that is asserted there is that the boss can die at all.
+    const want = trials >= 6 ? Math.ceil(trials / 2) : 1;
+    check(killed >= want,
       `floor ${floor} boss (${name}) survived ${trials - killed} of ${trials} immortal-player fights`);
     if (median) {
       check(median > 8 && median < 110,

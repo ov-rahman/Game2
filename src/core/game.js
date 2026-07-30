@@ -9,19 +9,17 @@
  */
 import {
   CELL,
-  WALL_H,
   GRID_W,
   GRID_H,
   C,
   TEAM,
-  PLAYER,
   isOpen,
 } from './constants.js';
 import { Rng } from './rng.js';
 import { EventBus } from './events.js';
-import { generateDungeon, ROOM_KIND, cellAtWorld, roomAtWorld } from './world/dungeongen.js';
+import { generateDungeon, ROOM_KIND, roomAtWorld } from './world/dungeongen.js';
 import { NavField } from './world/nav.js';
-import { blocked, findFreeSpot, hasLineOfSight, moveBody, raycast } from './world/collision.js';
+import { findFreeSpot, hasLineOfSight, moveBody, raycast } from './world/collision.js';
 import { ShotPool } from './entities/projectile.js';
 import { createEnemy, updateEnemy } from './entities/enemy.js';
 import { createPlayer, updatePlayer, aimDirection } from './entities/player.js';
@@ -29,8 +27,8 @@ import { updateShots, updateAreas } from './combat.js';
 import { addItem, setActive, recomputeStats, runHook, chargeActive, hasItem } from './items/inventory.js';
 import { cloneShot as cloneShotImpl } from './items/shots.js';
 import { createBoss, updateBoss } from './bosses/index.js';
-import { FLOORS, getFloor, FLOOR_COUNT } from '../data/floors.js';
-import { ITEMS, ITEM_IDS, ACTIVES, ACTIVE_IDS } from '../data/items.js';
+import { getFloor, FLOOR_COUNT } from '../data/floors.js';
+import { ITEMS, ITEM_IDS, ACTIVE_IDS } from '../data/items.js';
 import { ENEMIES } from '../data/enemies.js';
 import { SPRITE } from '../data/sprite-ids.js';
 import { clamp, lerp, dist2d, dist2dSq, angleDelta } from './math3.js';
