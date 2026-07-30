@@ -18,7 +18,7 @@ export function createChiroptera(game, x, z) {
     x, z,
     radius: 1.4,
     hp: 620,
-    speed: 6.0,
+    speed: 5.0,
     touch: 2,
     flying: true,
     phaseThresholds: [0.66, 0.32],

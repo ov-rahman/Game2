@@ -857,7 +857,14 @@ export class Game {
   damageEnemy(e, amount, opts = {}) {
     if (!e.alive || e.invulnerable) return 0;
     let dmg = amount;
-    if (!opts.trueDamage && e.armor) dmg = Math.max(1, dmg - e.armor);
+    if (!opts.trueDamage && e.armor) {
+      // Flat subtraction alone is a trap: half the item pool fires many small
+      // projectiles — splits, chains, shrapnel, multishot — and armour 3 was
+      // eating 43% of everything a late build could put out, which quietly
+      // made those items worthless against exactly the enemies they exist for.
+      // Armour never takes more than three quarters of a hit.
+      dmg = Math.max(dmg * 0.25, dmg - e.armor);
+    }
     if (e.frozen > 0) dmg *= 1.25;
     if (this.player.flags.mark && !e.marked) {
       e.marked = true;

@@ -129,6 +129,7 @@ export class Bot {
     // 0 disables backing off entirely, which is the "walks into everything"
     // baseline. Anything above it is a player who keeps their distance.
     this.standoff = opts.standoff == null ? 6.5 : opts.standoff;
+    this.chase = false;
     // An explorer clears the floor; a runner heads straight for the lair. The
     // difference measures how much of the difficulty is optional.
     this.explore = opts.explore !== false;
@@ -345,6 +346,7 @@ export class Bot {
     // "walk it down" half the bot simply outruns slow bosses forever.
     // Retreating to a medkit outranks holding a firing line.
     const threat = this.healing ? null : this.nearestThreat();
+    this.chase = false;
     if (threat) {
       const reach = this.reach();
       const away = { x: (p.x - threat.e.x) / threat.d, z: (p.z - threat.e.z) / threat.d };
@@ -357,6 +359,7 @@ export class Bot {
         };
       } else if (threat.d > reach * 0.6) {
         dir = { x: -away.x, z: -away.z };
+        this.chase = true;
       } else if (this.standoff > 0) {
         dir = strafe;
       }
@@ -378,8 +381,12 @@ export class Bot {
     const cosY = Math.cos(p.yaw);
     inp.move.z = -(wx * sinY + wz * cosY);
     inp.move.x = -wx * cosY + wz * sinY;
-    inp.down.sprint = p.stamina > 2 && !g.enemies.some((e) => e.alive && !e.dormant
-      && (e.x - p.x) ** 2 + (e.z - p.z) ** 2 < 100);
+    // Sprint when nothing is close, and also when running down something that
+    // is outpacing us — several bosses move faster than a walk, and a bot that
+    // never sprints simply loses them.
+    const chasing = this.chase && p.stamina > 1.5;
+    inp.down.sprint = chasing || (p.stamina > 2 && !g.enemies.some((e) => e.alive && !e.dormant
+      && (e.x - p.x) ** 2 + (e.z - p.z) ** 2 < 100));
   }
 
   aimAndShoot(dt) {

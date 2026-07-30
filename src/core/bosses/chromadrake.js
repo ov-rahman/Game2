@@ -24,8 +24,8 @@ export function createChromadrake(game, x, z) {
     art: 'chromadrake',
     x, z,
     radius: 2.2,
-    hp: 1900,
-    speed: 5.0,
+    hp: 1300,
+    speed: 4.4,
     touch: 2,
     armor: 3,
     flying: true,
@@ -34,11 +34,11 @@ export function createChromadrake(game, x, z) {
     onPhase(g, boss, phase) {
       if (phase === 2) {
         g.message('ЧЕШУЯ РАСКАЛЫВАЕТСЯ НА ЦВЕТА', '', 2.2);
-        boss.speed = 6.2;
+        boss.speed = 5.2;
       }
       if (phase === 3) {
         g.message('ПРИЗМАТИЧЕСКАЯ ЯРОСТЬ', '', 2.4);
-        boss.speed = 7.4;
+        boss.speed = 6.0;
       }
     },
   });

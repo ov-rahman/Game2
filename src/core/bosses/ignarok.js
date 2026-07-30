@@ -16,7 +16,7 @@ export function createIgnarok(game, x, z) {
     art: 'ignarok',
     x, z,
     radius: 2.0,
-    hp: 1300,
+    hp: 1100,
     speed: 2.6,
     touch: 2,
     armor: 2,
