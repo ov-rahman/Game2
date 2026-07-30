@@ -32,11 +32,12 @@
   }
 
   // ES modules cannot load over file:// — browsers apply CORS to module
-  // scripts. standalone.html is the single-file build that works from disk.
+  // scripts — so the page needs any static server in front of it.
   if (location.protocol === 'file:') {
     fail(
-      'Браузер блокирует ES-модули на file://. Открой standalone.html ' +
-      'или запусти локальный сервер: python3 -m http.server',
+      'Браузер блокирует ES-модули на file://. Запусти локальный сервер ' +
+      'в папке игры и открой http://localhost:8000/ — например: ' +
+      'python3 -m http.server 8000',
     );
   } else {
     try {

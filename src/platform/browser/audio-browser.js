@@ -37,6 +37,7 @@ export function createBrowserAudio(opts = {}) {
   let musicSeed = 1;
 
   let ambience = null;
+  let ambienceId = null;
   let ambienceNodes = null;
   let creakTimer = 0;
 
@@ -425,6 +426,7 @@ export function createBrowserAudio(opts = {}) {
 
     setAmbience(id) {
       const def = id ? AMBIENCE[id] : null;
+      ambienceId = def ? id : null;
       if (!ctx) {
         ambience = def;
         return;
@@ -513,7 +515,9 @@ export function createBrowserAudio(opts = {}) {
         musicBus.gain.setValueAtTime(0.0001, t);
         musicBus.gain.linearRampToValueAtTime(musicVol, t + 1.0);
       }
-      if (ambience && !ambienceNodes) this.setAmbience(null);
+      // The floor's drone was requested before the context existed; start it
+      // for real now instead of throwing it away.
+      if (ambienceId && !ambienceNodes) this.setAmbience(ambienceId);
     },
 
     dispose() {

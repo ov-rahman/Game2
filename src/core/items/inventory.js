@@ -18,6 +18,7 @@ const HOOK_NAMES = [
   'onHurt',
   'onContact',
   'onRoomEnter',
+  'onRoomClear',
   'onFloorStart',
   'onUpdate',
 ];

@@ -66,6 +66,10 @@ export function createBrowserInput(canvas, opts = {}) {
   let padSensitivity = opts.padSensitivity || 0.045;
   let locked = false;
   let invertY = false;
+  // Whether gameplay currently wants the pointer. Clicking the canvas while
+  // this is set re-captures it instead of firing the weapon; menus clear it so
+  // the cursor stays free.
+  let wantLock = false;
 
   const snapshot = {
     move: { x: 0, z: 0 },
@@ -108,7 +112,15 @@ export function createBrowserInput(canvas, opts = {}) {
   }
 
   function onMouseDown(e) {
-    if (!locked) return;
+    if (!locked) {
+      // The click that brings the player back into the game must not also be
+      // a shot: re-capture and swallow it.
+      if (wantLock) {
+        api.requestLock();
+        e.preventDefault();
+      }
+      return;
+    }
     if (e.button === 0) setAction('fire', true);
     else if (e.button === 2) setAction('altFire', true);
     e.preventDefault();
@@ -183,7 +195,7 @@ export function createBrowserInput(canvas, opts = {}) {
     return { mx, mz, lx, ly, connected };
   }
 
-  return {
+  const api = {
     name: 'browser-input',
 
     sample() {
@@ -225,7 +237,17 @@ export function createBrowserInput(canvas, opts = {}) {
       for (const a of ACTIONS) pressed[a] = false;
     },
 
+    /** Tell the adapter whether gameplay wants the pointer captured. */
+    setLockWanted(v) {
+      wantLock = !!v;
+    },
+
+    lockWanted() {
+      return wantLock;
+    },
+
     requestLock() {
+      wantLock = true;
       if (locked) return;
       const p = canvas.requestPointerLock({ unadjustedMovement: true });
       // Chrome returns a promise; older engines return undefined.
@@ -241,6 +263,7 @@ export function createBrowserInput(canvas, opts = {}) {
     },
 
     releaseLock() {
+      wantLock = false;
       if (document.exitPointerLock) document.exitPointerLock();
     },
 
@@ -272,4 +295,6 @@ export function createBrowserInput(canvas, opts = {}) {
       document.removeEventListener('pointerlockchange', onLockChange);
     },
   };
+
+  return api;
 }

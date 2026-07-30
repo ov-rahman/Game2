@@ -4,7 +4,7 @@
  */
 import { getEnemy } from '../../data/enemies.js';
 import { creatureArt } from '../../data/creature-art.js';
-import { getBehavior } from '../ai/behaviors.js';
+import { getBehavior, chaseDecoy } from '../ai/behaviors.js';
 import { C } from '../constants.js';
 import { cellAtWorld } from '../world/collision.js';
 
@@ -112,6 +112,7 @@ export function createEnemy(id, x, z, opts = {}) {
       marks: null,
       markT: 0,
       revealed: false,
+      decoy: null,
     },
 
     fromSpawn: !!opts.fromSpawn,
@@ -181,7 +182,7 @@ export function updateEnemy(game, e, dt) {
   const slowMul = e.slow > 0 ? 0.5 : 1;
   const backup = e.speed;
   e.speed *= slowMul;
-  e.behavior(game, e, dt);
+  if (!e.ai.decoy || !chaseDecoy(game, e, dt)) e.behavior(game, e, dt);
   e.speed = backup;
 
   // Flyers hover; walkers hug the floor.

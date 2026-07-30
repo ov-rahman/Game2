@@ -64,6 +64,7 @@ export class Game {
     this.props = [];
     this.areas = [];
     this.pendingStrikes = [];
+    this.decoys = [];
     this.dynamicLights = [];
     this.exploredCells = new Set();
 
@@ -132,6 +133,7 @@ export class Game {
     this.props.length = 0;
     this.areas.length = 0;
     this.pendingStrikes.length = 0;
+    this.decoys.length = 0;
     this.dynamicLights.length = 0;
     this.messages.length = 0;
     this.exploredCells.clear();
@@ -170,10 +172,12 @@ export class Game {
     this.props.length = 0;
     this.areas.length = 0;
     this.pendingStrikes.length = 0;
+    this.decoys.length = 0;
     this.shots.clear();
     this.exploredCells.clear();
     this.messages.length = 0;
     this.bossActive = false;
+    this.boss = null;
 
     this.player.x = this.dungeon.start.x;
     this.player.z = this.dungeon.start.z;
@@ -265,6 +269,11 @@ export class Game {
       if (this.dungeon.roomAt[gy * GRID_W + gx] >= 0) continue;
       this.addProp({ type: 'pickup', kind: 'battery', x: (gx + 0.5) * CELL, z: (gy + 0.5) * CELL });
       placed++;
+    }
+
+    // A room with nothing living in it starts cleared; the rest are earned.
+    for (const room of d.rooms) {
+      room.cleared = !this.enemies.some((e) => e.homeRoom === room.id);
     }
   }
 
@@ -446,6 +455,7 @@ export class Game {
     updateShots(this, sdt);
     updateAreas(this, sdt);
     this.updateStrikes(sdt);
+    this.updateDecoys(sdt);
     this.updateProps(dt);
     this.updateExploration();
     this.updateDynamicLights();
@@ -556,10 +566,16 @@ export class Game {
     const p = this.player;
     this.prompt = '';
     const range = p.stats.pickupRange;
+
+    // Pickups are automatic; interactables are not, so they are resolved in a
+    // second pass. Only the *nearest* one may be targeted — three shop stands
+    // sit inside each other's radius, and offering whichever happens to be
+    // first in the array means you cannot buy the one you are standing at.
+    let target = null;
+    let targetD = 3.2;
     for (let i = this.props.length - 1; i >= 0; i--) {
       const prop = this.props[i];
       const d = dist2d(prop.x, prop.z, p.x, p.z);
-
       if (prop.type === 'pickup') {
         if (d < range) {
           this.collectPickup(prop);
@@ -567,54 +583,73 @@ export class Game {
         }
         continue;
       }
-
-      if (d > 3.2) continue;
-
-      if (prop.type === 'pedestal') {
-        if (prop.locked && !this.roomCleared(prop.roomId)) {
-          this.prompt = 'сначала зачисти комнату';
-          continue;
-        }
-        this.prompt = `E — взять: ${ITEMS[prop.itemId].name}`;
-        if (this.interactPressed) {
-          this.props.splice(i, 1);
-          this.grantItem(prop.itemId);
-        }
-      } else if (prop.type === 'shop') {
-        const price = prop.price;
-        const label = prop.kind === 'item' ? ITEMS[prop.itemId].name : prop.kind === 'heal' ? 'аптечка' : 'батарея';
-        this.prompt = `E — купить: ${label}  (${price} ◈)`;
-        if (this.interactPressed) {
-          if (p.coins >= price) {
-            p.coins -= price;
-            this.props.splice(i, 1);
-            if (prop.kind === 'item') this.grantItem(prop.itemId);
-            else if (prop.kind === 'heal') this.healPlayer(4);
-            else {
-              this.torch.charge = 1;
-              this.sfx('reloadTorch');
-            }
-          } else {
-            this.sfx('deny');
-          }
-        }
+      if (d < targetD) {
+        targetD = d;
+        target = prop;
       }
     }
 
-    // Stairs.
+    // The stairs compete for the same prompt and win when they are closer.
     const st = this.dungeon.stairs;
-    if (st.active) {
-      const d = dist2d(st.x, st.z, p.x, p.z);
-      if (d < 2.2) {
-        this.prompt = 'E — спуститься ниже';
-        if (this.interactPressed) {
-          this.sfx('stairs');
-          this.events.emit('descend', { from: this.floorIndex });
-          this.nextFloor();
-        }
+    const stairsD = dist2d(st.x, st.z, p.x, p.z);
+    const atStairs = stairsD < 2.4;
+
+    if (st.active && atStairs && (!target || stairsD <= targetD)) {
+      this.prompt = 'E — спуститься ниже';
+      if (this.interactPressed) {
+        this.interactPressed = false;
+        this.sfx('stairs');
+        this.events.emit('descend', { from: this.floorIndex });
+        this.nextFloor();
+        return;
       }
+    } else if (target) {
+      this.offerProp(target);
+    } else if (atStairs) {
+      this.prompt = 'лестница закрыта — убей хозяина этажа';
     }
     this.interactPressed = false;
+  }
+
+  /** Prompt for one interactable and act on it if E was pressed this tick. */
+  offerProp(prop) {
+    const p = this.player;
+    if (prop.type === 'pedestal') {
+      if (prop.locked && !this.roomCleared(prop.roomId)) {
+        this.prompt = 'сначала зачисти комнату';
+        return;
+      }
+      this.prompt = `E — взять: ${ITEMS[prop.itemId].name}`;
+      if (!this.interactPressed) return;
+      this.removeProp(prop);
+      this.grantItem(prop.itemId);
+      return;
+    }
+    if (prop.type !== 'shop') return;
+
+    const price = prop.price;
+    const label = prop.kind === 'item' ? ITEMS[prop.itemId].name
+      : prop.kind === 'heal' ? 'аптечка' : 'батарея';
+    this.prompt = `E — купить: ${label}  (${price} ◈)`;
+    if (!this.interactPressed) return;
+    if (p.coins < price) {
+      this.prompt = `не хватает осколков: ${p.coins}/${price}`;
+      this.sfx('deny');
+      return;
+    }
+    p.coins -= price;
+    this.removeProp(prop);
+    if (prop.kind === 'item') this.grantItem(prop.itemId);
+    else if (prop.kind === 'heal') this.healPlayer(4);
+    else {
+      this.torch.charge = 1;
+      this.sfx('reloadTorch');
+    }
+  }
+
+  removeProp(prop) {
+    const i = this.props.indexOf(prop);
+    if (i >= 0) this.props.splice(i, 1);
   }
 
   roomCleared(roomId) {
@@ -762,8 +797,10 @@ export class Game {
       this.bossActive = false;
       this.objective = 'лестница открыта';
       this.message('ПУТЬ ВНИЗ ОТКРЫТ', '', 3);
-      // Boss reward.
-      this.addProp({ type: 'pedestal', x: e.x + 2, z: e.z, itemId: this.pickItem('boss') });
+      // Boss reward. A big boss dies where it stood, which can be against a
+      // wall, so the pedestal has to be placed on ground that exists.
+      const spot = findFreeSpot(this.dungeon.cells, e.x + 2, e.z, 0.6, this.rng);
+      this.addProp({ type: 'pedestal', x: spot.x, z: spot.z, itemId: this.pickItem('boss') });
       for (let i = 0; i < 6; i++) {
         this.dropPickup(e.x + this.rng.range(-2, 2), e.z + this.rng.range(-2, 2), 'shard');
       }
@@ -804,7 +841,17 @@ export class Game {
     }
 
     if (chargeActive(this.player, 1)) this.events.emit('activeReady', {});
-    this.stats.roomsCleared = this.enemies.filter((x) => !x.alive).length;
+
+    // A room counts as cleared the moment its last resident dies. (This used
+    // to report the number of corpses still playing their death animation.)
+    if (e.homeRoom != null && e.homeRoom >= 0 && this.roomCleared(e.homeRoom)) {
+      const room = this.dungeon.rooms[e.homeRoom];
+      if (room && !room.cleared) {
+        room.cleared = true;
+        this.stats.roomsCleared++;
+        runHook(this.player, 'onRoomClear', { game: this, player: this.player, room });
+      }
+    }
   }
 
   damageEnemiesNear(x, z, radius, amount, source, stun = 0) {
@@ -906,7 +953,7 @@ export class Game {
   }
 
   /** Wake every monster within radius — explosions and screams carry. */
-  alertNearby(x, z, radius) {
+  alertNearby(x, z, radius, opts = {}) {
     for (const e of this.enemies) {
       if (!e.alive || e.isBoss) continue;
       if (dist2dSq(e.x, e.z, x, z) > radius * radius) continue;
@@ -915,6 +962,8 @@ export class Game {
       e.ai.loseT = 6;
       e.ai.lastSeenX = x;
       e.ai.lastSeenZ = z;
+      // A decoy has to out-shout the player, or it is only a firework.
+      if (opts.toward) e.ai.decoy = opts.toward;
     }
   }
 
@@ -947,10 +996,35 @@ export class Game {
     }
   }
 
+  /**
+   * A noisemaker that keeps screaming: one alert pulse would be over before
+   * the player could use the opening, so it lives for `time` seconds and pulls
+   * monsters in on a beat.
+   */
   spawnDecoy(time) {
     const p = this.player;
-    this.alertNearby(p.x + Math.sin(p.yaw) * 6, p.z + Math.cos(p.yaw) * 6, 25);
-    this.fx('spawn', { x: p.x + Math.sin(p.yaw) * 6, y: 0.8, z: p.z + Math.cos(p.yaw) * 6, color: [1, 0.9, 0.4] });
+    const dir = { x: Math.sin(p.yaw), z: Math.cos(p.yaw) };
+    const spot = findFreeSpot(this.dungeon.cells, p.x + dir.x * 6, p.z + dir.z * 6, 0.4, this.rng);
+    this.decoys.push({ x: spot.x, z: spot.z, t: time, tick: 0 });
+    this.fx('spawn', { x: spot.x, y: 0.8, z: spot.z, color: [1, 0.9, 0.4] });
+    this.sfx('charge', { x: spot.x, y: 0.8, z: spot.z, gain: 0.8 });
+  }
+
+  updateDecoys(dt) {
+    for (let i = this.decoys.length - 1; i >= 0; i--) {
+      const d = this.decoys[i];
+      d.t -= dt;
+      if (d.t <= 0) {
+        this.decoys.splice(i, 1);
+        continue;
+      }
+      d.tick -= dt;
+      if (d.tick > 0) continue;
+      d.tick = 0.7;
+      this.alertNearby(d.x, d.z, 22, { toward: d });
+      this.sfx('coin', { x: d.x, y: 0.8, z: d.z, gain: 0.5 });
+      this.fx('spawn', { x: d.x, y: 0.6, z: d.z, color: [1, 0.9, 0.4] });
+    }
   }
 
   blinkPlayer(distance) {
