@@ -9,12 +9,10 @@
  */
 import {
   CELL,
-  WALL_H,
   GRID_W,
   GRID_H,
   C,
   TEAM,
-  PLAYER,
   isOpen,
 } from './constants.js';
 import { Rng } from './rng.js';
@@ -22,7 +20,7 @@ import { EventBus } from './events.js';
 import { generateDungeon, ROOM_KIND, cellAtWorld, roomAtWorld } from './world/dungeongen.js';
 import { groundAt } from './world/terrain.js';
 import { NavField } from './world/nav.js';
-import { blocked, findFreeSpot, hasLineOfSight, raycast } from './world/collision.js';
+import { findFreeSpot, hasLineOfSight, moveBody, raycast } from './world/collision.js';
 import { ShotPool } from './entities/projectile.js';
 import { createEnemy, updateEnemy } from './entities/enemy.js';
 import { createPlayer, updatePlayer, aimDirection } from './entities/player.js';
@@ -45,6 +43,8 @@ import { WEAPONS, WEAPON_IDS, RELICS, BOSS_RELIC, STARTING_WEAPON, rarityOf } fr
 import { ENEMIES } from '../data/enemies.js';
 import { SPRITE } from '../data/sprite-ids.js';
 import { clamp, lerp, dist2d, dist2dSq, angleDelta } from './math3.js';
+import { Menu } from './ui/menu.js';
+import { getDifficulty } from '../data/difficulty.js';
 
 export const STATE = {
   TITLE: 'title',
@@ -56,6 +56,24 @@ export const STATE = {
 
 const NAV_INTERVAL = 0.22;
 
+/** Shipped defaults; the settings screen resets to exactly this. */
+export const DEFAULT_SETTINGS = {
+  filterStrength: 1,
+  brightness: 0,
+  wobble: true,
+  sensitivity: 0.0022,
+  invertY: false,
+  difficulty: 'normal',
+  master: 0.85,
+  music: 0.45,
+  sfx: 1,
+};
+
+/** Seconds without taking a hit before the player starts patching up. */
+const REGEN_DELAY = 11;
+/** Seconds per point regained, up to half of maximum health. */
+const REGEN_INTERVAL = 5;
+
 export class Game {
   constructor(opts = {}) {
     this.events = opts.events || new EventBus();
@@ -63,18 +81,15 @@ export class Game {
     this.seed = this.rng.seed;
 
     this.state = STATE.TITLE;
-    this.settings = {
-      filterStrength: 1,
-      brightness: 0,
-      wobble: true,
-      sensitivity: 0.0022,
-    };
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.menu = new Menu(this);
 
     this.shots = new ShotPool(opts.shotCap || 420);
     this.enemies = [];
     this.props = [];
     this.areas = [];
     this.pendingStrikes = [];
+    this.decoys = [];
     this.dynamicLights = [];
     this.exploredCells = new Set();
 
@@ -122,6 +137,17 @@ export class Game {
     this.seenItems = new Set();
   }
 
+  /** Restore every setting to the shipped value. */
+  resetSettings() {
+    Object.assign(this.settings, DEFAULT_SETTINGS);
+    this.events.emit('settingsChanged', { settings: this.settings });
+  }
+
+  /** The tuning this run is being played under. */
+  difficulty() {
+    return getDifficulty(this.settings.difficulty);
+  }
+
   freshStats() {
     return {
       kills: 0,
@@ -146,6 +172,7 @@ export class Game {
     this.props.length = 0;
     this.areas.length = 0;
     this.pendingStrikes.length = 0;
+    this.decoys.length = 0;
     this.dynamicLights.length = 0;
     this.messages.length = 0;
     this.exploredCells.clear();
@@ -155,6 +182,7 @@ export class Game {
     this.timeScaleTarget = 1;
 
     this.player = createPlayer(0, 0);
+    this.player.bonusHp = this.difficulty().bonusHp;
     recomputeStats(this, this.player);
     this.player.hp = this.player.stats.maxHp;
     setActive(this.player, this.rng.pick(ACTIVE_IDS));
@@ -184,10 +212,12 @@ export class Game {
     this.props.length = 0;
     this.areas.length = 0;
     this.pendingStrikes.length = 0;
+    this.decoys.length = 0;
     this.shots.clear();
     this.exploredCells.clear();
     this.messages.length = 0;
     this.bossActive = false;
+    this.boss = null;
 
     this.player.x = this.dungeon.start.x;
     this.player.z = this.dungeon.start.z;
@@ -225,9 +255,17 @@ export class Game {
       if (room.kind === ROOM_KIND.BOSS) {
         const w = room.world();
         const boss = createBoss(this, def.boss, w.x, w.z);
+        boss.maxHp = Math.max(1, Math.round(boss.maxHp * this.difficulty().enemyHp));
+        boss.hp = boss.maxHp;
         boss.dormant = true;
         this.enemies.push(boss);
         this.boss = boss;
+        // A supply cache inside the lair. Arriving at a boss on two health
+        // after fighting across the whole floor is a coin flip, not a fight.
+        const edge = Math.min(room.w, room.h) * CELL * 0.32;
+        this.addProp({ type: 'pickup', kind: 'heal', x: w.x - edge, z: w.z - edge });
+        this.addProp({ type: 'pickup', kind: 'heal', x: w.x + edge, z: w.z - edge });
+        this.addProp({ type: 'pickup', kind: 'battery', x: w.x - edge, z: w.z + edge });
         continue;
       }
 
@@ -258,9 +296,12 @@ export class Game {
         continue;
       }
 
-      // Normal / challenge rooms get a monster budget scaled by distance.
-      const mul = room.kind === ROOM_KIND.CHALLENGE ? 1.9 : 1;
-      const budget = (1.4 + room.depth * 0.55) * def.difficulty * mul;
+      // Normal / challenge rooms get a monster budget scaled by distance from
+      // spawn. The scaling is capped: uncapped, the far side of a floor held
+      // three times the garrison of the near side and the run became a war of
+      // attrition nobody could finish.
+      const mul = room.kind === ROOM_KIND.CHALLENGE ? 1.8 : 1;
+      const budget = (1.2 + Math.min(room.depth, 5) * 0.45) * def.difficulty * mul;
       this.spawnPack(room, budget);
 
       if (room.kind === ROOM_KIND.CHALLENGE) {
@@ -271,7 +312,7 @@ export class Game {
       // Scattered loot.
       if (this.rng.chance(0.55)) {
         const spot = this.randomSpotIn(room);
-        this.addProp({ type: 'pickup', kind: this.rng.pick(['shard', 'shard', 'heal', 'battery']), x: spot.x, z: spot.z });
+        this.addProp({ type: 'pickup', kind: this.rng.pick(['shard', 'heal', 'heal', 'battery']), x: spot.x, z: spot.z });
       }
 
       // Chests. Most hold supplies; one in six is a weapon crate, and a
@@ -319,6 +360,11 @@ export class Game {
       this.addProp({ type: 'pickup', kind: 'battery', x: (gx + 0.5) * CELL, z: (gy + 0.5) * CELL });
       placed++;
     }
+
+    // A room with nothing living in it starts cleared; the rest are earned.
+    for (const room of d.rooms) {
+      room.cleared = !this.enemies.some((e) => e.homeRoom === room.id);
+    }
   }
 
   spawnPack(room, budget) {
@@ -333,14 +379,16 @@ export class Game {
       spent += cost;
       const spot = this.randomSpotIn(room);
       const e = createEnemy(pick.id, spot.x, spot.z, {
-        hpScale: 1 + (this.floorIndex - 1) * 0.06,
+        hpScale: (1 + (this.floorIndex - 1) * 0.06) * this.difficulty().enemyHp,
       });
       e.homeRoom = room.id;
       this.enemies.push(e);
     }
     if (def.elites && def.elites.length && this.rng.chance(def.eliteChance)) {
       const spot = this.randomSpotIn(room);
-      const e = createEnemy(this.rng.pick(def.elites), spot.x, spot.z, { hpScale: 1 + (this.floorIndex - 1) * 0.08 });
+      const e = createEnemy(this.rng.pick(def.elites), spot.x, spot.z, {
+        hpScale: (1 + (this.floorIndex - 1) * 0.08) * this.difficulty().enemyHp,
+      });
       e.homeRoom = room.id;
       this.enemies.push(e);
     }
@@ -456,7 +504,13 @@ export class Game {
   // ---------------------------------------------------------------- step
 
   step(dt, input) {
-    if (this.state === STATE.TITLE || this.state === STATE.PAUSED) return;
+    this.syncMenu();
+    if (this.menu.open) {
+      this.stepMenu(input);
+      // The death and victory screens keep animating behind their menu.
+      if (this.state !== STATE.TITLE && this.state !== STATE.PAUSED) this.updateTimers(dt);
+      return;
+    }
     if (this.state !== STATE.PLAYING) {
       this.updateTimers(dt);
       return;
@@ -495,6 +549,7 @@ export class Game {
       this.torch.inner = 0.6;
       this.torch.outer = 1.05;
     }
+    this.updateTorchBurn(sdt);
 
     // Navigation field: one BFS a few times a second serves every monster.
     this.navTimer -= dt;
@@ -508,15 +563,107 @@ export class Game {
       if (this.packToken.t <= 0 || !this.packToken.holder.alive) this.packToken.holder = null;
     }
 
+    this.updateRegen(dt);
     this.updateEnemies(sdt);
     updateShots(this, sdt);
     updateAreas(this, sdt);
     this.updateStrikes(sdt);
+    this.updateDecoys(sdt);
     this.updateProps(dt);
     this.updateExploration();
     this.updateDynamicLights();
 
     if (this.player.hp <= 0 && !this.player.dead) this.killPlayer();
+  }
+
+  /**
+   * The "Прожектор" synergy: the beam itself becomes a weapon — anything
+   * caught in the cone is dazzled and scorched.
+   */
+  updateTorchBurn(dt) {
+    if (!this.player.flags.torchBurns) return;
+    if (!this.torch.on || this.torch.charge <= 0.02) return;
+    this.torchBurnT = (this.torchBurnT || 0) - dt;
+    if (this.torchBurnT > 0) return;
+    this.torchBurnT = 0.4;
+    const range = this.torch.range;
+    for (const e of this.enemies) {
+      if (!e.alive || e.dormant || e.hidden) continue;
+      if (dist2dSq(e.x, e.z, this.player.x, this.player.z) > range * range) continue;
+      if (!this.torchLightsPoint(e.x, e.z)) continue;
+      if (!hasLineOfSight(this.dungeon.cells, this.player.x, this.player.z, e.x, e.z, {})) continue;
+      this.applyBurn(e, 1.6, 2.2);
+      e.slow = Math.max(e.slow, 0.6);
+    }
+  }
+
+  /**
+   * Catching your breath. Out of combat the player slowly patches themselves
+   * up, but only to half health — enough that one bad room does not doom a
+   * run, not enough to replace medkits or to make a fight survivable by
+   * standing still in it.
+   */
+  updateRegen(dt) {
+    const p = this.player;
+    if (p.dead || p.hp >= p.stats.maxHp) return;
+    p.calmT = (p.calmT || 0) + dt;
+    if (p.calmT < REGEN_DELAY) return;
+    const cap = Math.max(1, Math.ceil(p.stats.maxHp * 0.5));
+    if (p.hp >= cap) return;
+    p.regenT = (p.regenT || 0) + dt;
+    if (p.regenT < REGEN_INTERVAL) return;
+    p.regenT = 0;
+    p.hp = Math.min(cap, p.hp + 1);
+    p.statsDirty = true;
+    this.fx('heal', { x: p.x, y: p.y + 1, z: p.z });
+  }
+
+  // ------------------------------------------------------------------ menu
+
+  /** Keep the menu stack in step with the game state. */
+  syncMenu() {
+    switch (this.state) {
+      case STATE.TITLE: this.menu.show('title'); break;
+      case STATE.PAUSED: this.menu.show('pause'); break;
+      case STATE.DEAD: this.menu.show('dead'); break;
+      case STATE.WIN: this.menu.show('win'); break;
+      default: this.menu.closeAll();
+    }
+  }
+
+  stepMenu(input) {
+    const m = this.menu;
+    const pressed = input.pressed;
+    if (pressed.menuUp) m.move(-1);
+    if (pressed.menuDown) m.move(1);
+    if (pressed.menuLeft) m.adjust(-1);
+    if (pressed.menuRight) m.adjust(1);
+    if (pressed.confirm || pressed.interact || pressed.use) m.activate();
+
+    // Escape steps back out of a sub-screen; at the top of a pause menu it
+    // means "resume", which only the shell can arrange.
+    if (pressed.cancel || pressed.pause) {
+      if (!m.back() && this.state === STATE.PAUSED) {
+        this.events.emit('uiCommand', { name: 'resume' });
+      }
+    }
+
+    const cur = input.cursor;
+    if (cur && cur.active) {
+      m.hover(cur.x, cur.y);
+      if (pressed.click) m.click(cur.x, cur.y);
+    }
+  }
+
+  /** Abandon the run and go back to the title screen. */
+  toTitle() {
+    this.state = STATE.TITLE;
+    this.bossActive = false;
+    this.shots.clear();
+    this.messages.length = 0;
+    this.showMap = false;
+    this.syncMenu();
+    this.events.emit('toTitle', {});
   }
 
   updateTimers(dt) {
@@ -578,13 +725,22 @@ export class Game {
     const rr = p.radius + e.radius;
     if (dist2dSq(p.x, p.z, e.x, e.z) > rr * rr) return;
     if (p.y + p.height < e.y || p.y > e.y + e.height) return;
-    e.contactCd = 0.8;
+    // Bosses are big, slow and always adjacent: without a longer gap between
+    // body hits a boss fight is decided by who is standing where, not by
+    // reading its telegraphs.
+    e.contactCd = e.isBoss ? 1.7 : 1.15;
     this.damagePlayer(e.touch, { source: 'contact', enemy: e });
     runHook(p, 'onContact', { game: this, player: p, enemy: e });
-    // Push apart so contact damage cannot machine-gun.
+    // Shove both bodies apart. Walking into a monster has to cost something,
+    // but a crowd should never be able to chain-tap the player to death. The
+    // shove goes through collision: an unchecked one buries the player in a
+    // wall, and a buried body can never move again.
     const a = Math.atan2(p.x - e.x, p.z - e.z);
-    p.x += Math.sin(a) * 0.4;
-    p.z += Math.cos(a) * 0.4;
+    moveBody(this.dungeon.cells, p, Math.sin(a) * 0.5, Math.cos(a) * 0.5, {});
+    if (!e.isBoss) {
+      e.vx -= Math.sin(a) * 4;
+      e.vz -= Math.cos(a) * 4;
+    }
   }
 
   updateStrikes(dt) {
@@ -601,98 +757,134 @@ export class Game {
     const p = this.player;
     this.prompt = '';
     const range = p.stats.pickupRange;
+
+    // Pickups are automatic; interactables are not, so they are resolved in a
+    // second pass. Only the *nearest* one may be targeted — three shop stands
+    // sit inside each other's radius, and offering whichever happens to be
+    // first in the array means you cannot buy the one you are standing at.
+    let target = null;
+    let targetD = 3.2;
     for (let i = this.props.length - 1; i >= 0; i--) {
       const prop = this.props[i];
       const d = dist2d(prop.x, prop.z, p.x, p.z);
-
       if (prop.type === 'pickup') {
-        if (d < range) {
+        // Vacuuming a medkit up at full health throws it away. Leave anything
+        // the player cannot use on the floor so they can come back for it —
+        // this is most of the run's healing budget.
+        if (d < range && this.pickupUseful(prop)) {
           this.collectPickup(prop);
           this.props.splice(i, 1);
         }
         continue;
       }
-
-      if (d > 3.2) continue;
-
-      if (prop.type === 'pedestal') {
-        if (prop.locked && !this.roomCleared(prop.roomId)) {
-          this.prompt = 'сначала зачисти комнату';
-          continue;
-        }
-        const it = ITEMS[prop.itemId];
-        this.prompt = `E — взять: ${it.name}  [${rarityOf(it.quality).name}]`;
-        if (this.interactPressed) {
-          this.props.splice(i, 1);
-          this.grantItem(prop.itemId);
-        }
-      } else if (prop.type === 'relic') {
-        const rel = RELICS[prop.relicId];
-        this.prompt = `E — забрать реликвию: ${rel.name}`;
-        if (this.interactPressed) {
-          this.props.splice(i, 1);
-          this.grantRelic(prop.relicId);
-        }
-      } else if (prop.type === 'weapon') {
-        const w = WEAPONS[prop.weaponId];
-        const cur = WEAPONS[p.inv.weaponId] || WEAPONS[STARTING_WEAPON];
-        this.prompt = `E — взять ${w.name}  (сейчас: ${cur.name})`;
-        if (this.interactPressed) {
-          // The old weapon stays on the rack, so a swap is reversible and
-          // picking one up is a decision rather than a trap.
-          const prev = setWeapon(p, prop.weaponId);
-          prop.weaponId = prev;
-          this.sfx('item');
-          this.message(w.name, w.desc, 3.4);
-          this.events.emit('weaponGet', { id: w, weaponId: prop.weaponId });
-        }
-      } else if (prop.type === 'chest') {
-        if (prop.locked && !this.roomCleared(prop.roomId)) {
-          this.prompt = 'сначала зачисти комнату';
-          continue;
-        }
-        // An opened chest must not clear a prompt some other prop set.
-        if (prop.opened) continue;
-        this.prompt = 'E — открыть сундук';
-        if (this.interactPressed) {
-          prop.opened = true;
-          this.openChest(prop);
-        }
-      } else if (prop.type === 'shop') {
-        const price = prop.price;
-        const label = prop.kind === 'item' ? ITEMS[prop.itemId].name : prop.kind === 'heal' ? 'аптечка' : 'батарея';
-        this.prompt = `E — купить: ${label}  (${price} ◈)`;
-        if (this.interactPressed) {
-          if (p.coins >= price) {
-            p.coins -= price;
-            this.props.splice(i, 1);
-            if (prop.kind === 'item') this.grantItem(prop.itemId);
-            else if (prop.kind === 'heal') this.healPlayer(4);
-            else {
-              this.torch.charge = 1;
-              this.sfx('reloadTorch');
-            }
-          } else {
-            this.sfx('deny');
-          }
-        }
+      if (d < targetD) {
+        targetD = d;
+        target = prop;
       }
     }
 
-    // Stairs.
+    // The stairs compete for the same prompt and win when they are closer.
     const st = this.dungeon.stairs;
-    if (st.active) {
-      const d = dist2d(st.x, st.z, p.x, p.z);
-      if (d < 2.2) {
-        this.prompt = 'E — спуститься ниже';
-        if (this.interactPressed) {
-          this.sfx('stairs');
-          this.events.emit('descend', { from: this.floorIndex });
-          this.nextFloor();
-        }
+    const stairsD = dist2d(st.x, st.z, p.x, p.z);
+    const atStairs = stairsD < 2.4;
+
+    if (st.active && atStairs && (!target || stairsD <= targetD)) {
+      this.prompt = 'E — спуститься ниже';
+      if (this.interactPressed) {
+        this.interactPressed = false;
+        this.sfx('stairs');
+        this.events.emit('descend', { from: this.floorIndex });
+        this.nextFloor();
+        return;
       }
+    } else if (target) {
+      this.offerProp(target);
+    } else if (atStairs) {
+      this.prompt = 'лестница закрыта — убей хозяина этажа';
     }
     this.interactPressed = false;
+  }
+
+  /** Would picking this up actually do anything right now? */
+  pickupUseful(prop) {
+    if (prop.kind === 'heal') return this.player.hp < this.player.stats.maxHp;
+    if (prop.kind === 'battery') return this.torch.charge < 0.92;
+    return true;
+  }
+
+  /** Prompt for one interactable and act on it if E was pressed this tick. */
+  offerProp(prop) {
+    const p = this.player;
+    if (prop.type === 'pedestal') {
+      if (prop.locked && !this.roomCleared(prop.roomId)) {
+        this.prompt = 'сначала зачисти комнату';
+        return;
+      }
+      const it = ITEMS[prop.itemId];
+      this.prompt = `E — взять: ${it.name}  [${rarityOf(it.quality).name}]`;
+      if (!this.interactPressed) return;
+      this.removeProp(prop);
+      this.grantItem(prop.itemId);
+      return;
+    }
+    if (prop.type === 'relic') {
+      this.prompt = `E — забрать реликвию: ${RELICS[prop.relicId].name}`;
+      if (!this.interactPressed) return;
+      this.removeProp(prop);
+      this.grantRelic(prop.relicId);
+      return;
+    }
+    if (prop.type === 'weapon') {
+      const w = WEAPONS[prop.weaponId];
+      const cur = WEAPONS[p.inv.weaponId] || WEAPONS[STARTING_WEAPON];
+      this.prompt = `E — взять ${w.name}  (сейчас: ${cur.name})`;
+      if (!this.interactPressed) return;
+      // The old weapon stays on the rack, so a swap is reversible and picking
+      // one up is a decision rather than a trap.
+      const prev = setWeapon(p, prop.weaponId);
+      prop.weaponId = prev;
+      this.sfx('item');
+      this.message(w.name, w.desc, 3.4);
+      this.events.emit('weaponGet', { id: w, weaponId: prop.weaponId });
+      return;
+    }
+    if (prop.type === 'chest') {
+      if (prop.opened) return;
+      if (prop.locked && !this.roomCleared(prop.roomId)) {
+        this.prompt = 'сначала зачисти комнату';
+        return;
+      }
+      this.prompt = 'E — открыть сундук';
+      if (!this.interactPressed) return;
+      prop.opened = true;
+      this.openChest(prop);
+      return;
+    }
+    if (prop.type !== 'shop') return;
+
+    const price = prop.price;
+    const label = prop.kind === 'item' ? ITEMS[prop.itemId].name
+      : prop.kind === 'heal' ? 'аптечка' : 'батарея';
+    this.prompt = `E — купить: ${label}  (${price} ◈)`;
+    if (!this.interactPressed) return;
+    if (p.coins < price) {
+      this.prompt = `не хватает осколков: ${p.coins}/${price}`;
+      this.sfx('deny');
+      return;
+    }
+    p.coins -= price;
+    this.removeProp(prop);
+    if (prop.kind === 'item') this.grantItem(prop.itemId);
+    else if (prop.kind === 'heal') this.healPlayer(Math.max(4, Math.round(p.stats.maxHp * 0.55)));
+    else {
+      this.torch.charge = 1;
+      this.sfx('reloadTorch');
+    }
+  }
+
+  removeProp(prop) {
+    const i = this.props.indexOf(prop);
+    if (i >= 0) this.props.splice(i, 1);
   }
 
   roomCleared(roomId) {
@@ -721,6 +913,19 @@ export class Game {
 
   updateDynamicLights() {
     this.dynamicLights.length = 0;
+    // The way down gets its own lamp, bright once it opens: at this point the
+    // player has to find one specific tile in a big dark room.
+    const st = this.dungeon.stairs;
+    this.dynamicLights.push({
+      x: st.x,
+      y: 1.1,
+      z: st.z,
+      r: 0.55, g: 1, b: 0.75,
+      radius: st.active ? 15 : 7,
+      intensity: st.active ? 2.2 : 0.7,
+      flicker: st.active ? 2.4 : 0,
+      phase: 0,
+    });
     for (const e of this.enemies) {
       if (e.alive && e.light && !e.dormant) this.dynamicLights.push(e.light);
     }
@@ -766,7 +971,14 @@ export class Game {
   damageEnemy(e, amount, opts = {}) {
     if (!e.alive || e.invulnerable) return 0;
     let dmg = amount;
-    if (!opts.trueDamage && e.armor) dmg = Math.max(1, dmg - e.armor);
+    if (!opts.trueDamage && e.armor) {
+      // Flat subtraction alone is a trap: half the item pool fires many small
+      // projectiles — splits, chains, shrapnel, multishot — and armour 3 was
+      // eating 43% of everything a late build could put out, which quietly
+      // made those items worthless against exactly the enemies they exist for.
+      // Armour never takes more than three quarters of a hit.
+      dmg = Math.max(dmg * 0.25, dmg - e.armor);
+    }
     if (e.frozen > 0) dmg *= 1.25;
     if (this.player.flags.mark && !e.marked) {
       e.marked = true;
@@ -829,13 +1041,25 @@ export class Game {
       this.dungeon.stairs.active = true;
       this.bossActive = false;
       this.objective = 'лестница открыта';
-      this.message('ПУТЬ ВНИЗ ОТКРЫТ', '', 3);
+      // Killing a floor's owner is the one guaranteed step-up in the run. The
+      // item pools are random, so without this the player's health never grows
+      // while the monsters' does, and floor 5 is unsurvivable by construction.
+      this.player.bonusHp = (this.player.bonusHp || 0) + 2;
+      this.player.statsDirty = true;
+      recomputeStats(this, this.player);
+      this.player.hp = this.player.stats.maxHp;
+      this.message('ПУТЬ ВНИЗ ОТКРЫТ', '+2 к здоровью, раны затянулись', 3.4);
+
       // Boss reward: an item, and the relic that belongs to this boss. The
       // relic is a trophy rather than a roll — clear the floor, get the thing.
-      this.addProp({ type: 'pedestal', x: e.x + 2, z: e.z, itemId: this.pickItem('boss') });
+      // A big boss dies where it stood, which can be against a wall, so both
+      // rewards have to be placed on ground that exists.
+      const spot = findFreeSpot(this.dungeon.cells, e.x + 2, e.z, 0.6, this.rng);
+      this.addProp({ type: 'pedestal', x: spot.x, z: spot.z, itemId: this.pickItem('boss') });
       const relicId = BOSS_RELIC[e.id];
       if (relicId && !this.player.inv.relics.includes(relicId)) {
-        this.addProp({ type: 'relic', x: e.x - 2.4, z: e.z + 1.4, relicId });
+        const rs = findFreeSpot(this.dungeon.cells, e.x - 2.4, e.z + 1.4, 0.6, this.rng);
+        this.addProp({ type: 'relic', x: rs.x, z: rs.z, relicId });
       }
       for (let i = 0; i < 6; i++) {
         this.dropPickup(e.x + this.rng.range(-2, 2), e.z + this.rng.range(-2, 2), 'shard');
@@ -880,12 +1104,39 @@ export class Game {
       const luck = this.player.stats.luck;
       const chance = (e.elite ? 0.7 : 0.2) + luck * 0.02;
       if (this.rng.chance(chance)) {
-        this.dropPickup(e.x, e.z, this.rng.pick(['shard', 'shard', 'shard', 'heal', 'battery']));
+        this.dropPickup(e.x, e.z, this.rng.pick(['shard', 'shard', 'shard', 'heal', 'heal', 'battery']));
       }
     }
 
     if (chargeActive(this.player, 1)) this.events.emit('activeReady', {});
-    this.stats.roomsCleared = this.enemies.filter((x) => !x.alive).length;
+
+    // A room counts as cleared the moment its last resident dies. (This used
+    // to report the number of corpses still playing their death animation.)
+    if (e.homeRoom != null && e.homeRoom >= 0 && this.roomCleared(e.homeRoom)) {
+      const room = this.dungeon.rooms[e.homeRoom];
+      if (room && !room.cleared) {
+        room.cleared = true;
+        this.stats.roomsCleared++;
+        this.rewardRoom(room, e);
+        runHook(this.player, 'onRoomClear', { game: this, player: this.player, room });
+      }
+    }
+  }
+
+  /**
+   * Emptying a room is the game's unit of progress, so it has to pay. Without
+   * this the only healing on a floor is whatever the generator happened to
+   * scatter, and attrition kills every run regardless of how well it is played.
+   */
+  rewardRoom(room, lastKill) {
+    const x = lastKill ? lastKill.x : room.world().x;
+    const z = lastKill ? lastKill.z : room.world().z;
+    this.sfx('confirm', { gain: 0.5 });
+    this.dropPickup(x, z, 'shard');
+    const luck = this.player.stats.luck || 0;
+    if (this.rng.chance(0.45 + luck * 0.03)) this.dropPickup(x + 0.8, z, 'heal');
+    if (this.rng.chance(0.3)) this.dropPickup(x - 0.8, z, 'battery');
+    if (room.kind === ROOM_KIND.CHALLENGE) this.dropPickup(x, z + 0.8, 'heal');
   }
 
   damageEnemiesNear(x, z, radius, amount, source, stun = 0) {
@@ -911,8 +1162,8 @@ export class Game {
       const dz = z - e.z;
       const d = Math.hypot(dx, dz);
       if (d > radius || d < 0.1) continue;
-      e.x += (dx / d) * force * (1 - d / radius);
-      e.z += (dz / d) * force * (1 - d / radius);
+      const k = force * (1 - d / radius);
+      moveBody(this.dungeon.cells, e, (dx / d) * k, (dz / d) * k, { flying: e.flying });
     }
   }
 
@@ -987,7 +1238,7 @@ export class Game {
   }
 
   /** Wake every monster within radius — explosions and screams carry. */
-  alertNearby(x, z, radius) {
+  alertNearby(x, z, radius, opts = {}) {
     for (const e of this.enemies) {
       if (!e.alive || e.isBoss) continue;
       if (dist2dSq(e.x, e.z, x, z) > radius * radius) continue;
@@ -996,6 +1247,8 @@ export class Game {
       e.ai.loseT = 6;
       e.ai.lastSeenX = x;
       e.ai.lastSeenZ = z;
+      // A decoy has to out-shout the player, or it is only a firework.
+      if (opts.toward) e.ai.decoy = opts.toward;
     }
   }
 
@@ -1028,10 +1281,35 @@ export class Game {
     }
   }
 
+  /**
+   * A noisemaker that keeps screaming: one alert pulse would be over before
+   * the player could use the opening, so it lives for `time` seconds and pulls
+   * monsters in on a beat.
+   */
   spawnDecoy(time) {
     const p = this.player;
-    this.alertNearby(p.x + Math.sin(p.yaw) * 6, p.z + Math.cos(p.yaw) * 6, 25);
-    this.fx('spawn', { x: p.x + Math.sin(p.yaw) * 6, y: 0.8, z: p.z + Math.cos(p.yaw) * 6, color: [1, 0.9, 0.4] });
+    const dir = { x: Math.sin(p.yaw), z: Math.cos(p.yaw) };
+    const spot = findFreeSpot(this.dungeon.cells, p.x + dir.x * 6, p.z + dir.z * 6, 0.4, this.rng);
+    this.decoys.push({ x: spot.x, z: spot.z, t: time, tick: 0 });
+    this.fx('spawn', { x: spot.x, y: 0.8, z: spot.z, color: [1, 0.9, 0.4] });
+    this.sfx('charge', { x: spot.x, y: 0.8, z: spot.z, gain: 0.8 });
+  }
+
+  updateDecoys(dt) {
+    for (let i = this.decoys.length - 1; i >= 0; i--) {
+      const d = this.decoys[i];
+      d.t -= dt;
+      if (d.t <= 0) {
+        this.decoys.splice(i, 1);
+        continue;
+      }
+      d.tick -= dt;
+      if (d.tick > 0) continue;
+      d.tick = 0.7;
+      this.alertNearby(d.x, d.z, 22, { toward: d });
+      this.sfx('coin', { x: d.x, y: 0.8, z: d.z, gain: 0.5 });
+      this.fx('spawn', { x: d.x, y: 0.6, z: d.z, color: [1, 0.9, 0.4] });
+    }
   }
 
   blinkPlayer(distance) {
@@ -1063,7 +1341,7 @@ export class Game {
       return 0;
     }
 
-    let dmg = Math.max(1, Math.round(amount));
+    let dmg = Math.max(1, Math.round(amount * this.difficulty().incoming));
     if (p.stats.armor > 0) dmg = Math.max(1, dmg - Math.floor(p.stats.armor / 2));
     if (p.flags.glass) dmg = 99;
 
@@ -1078,6 +1356,8 @@ export class Game {
     }
     p.invuln = 0.75;
     p.hurtFlash = 0.85;
+    p.calmT = 0;
+    p.regenT = 0;
     p.statsDirty = true;
     this.sfx('hurt');
     this.shake(1.1, 0.35, 0.4);
@@ -1161,7 +1441,7 @@ export class Game {
         this.sfx('coin');
         break;
       case 'heal':
-        this.healPlayer(3);
+        this.healPlayer(Math.max(4, Math.round(this.player.stats.maxHp * 0.5)));
         break;
       case 'battery':
         this.torch.charge = Math.min(1, this.torch.charge + 0.45);

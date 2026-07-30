@@ -28,7 +28,7 @@ export const ENEMIES = {
   thornhound: {
     name: 'Терновый пёс',
     art: 'thornhound',
-    hp: 22, speed: 3.4, radius: 0.45, height: 1.15, touch: 2,
+    hp: 22, speed: 3.4, radius: 0.45, height: 1.15, touch: 1,
     cost: 1.5, weight: 9, sight: 20, hear: 15,
     behavior: 'packHunter',
     params: { circle: 5.5, strikeEvery: 3.0, dashSpeed: 11, dashTime: 0.45, warn: 0.5 },
@@ -62,7 +62,7 @@ export const ENEMIES = {
   thornAlpha: {
     name: 'Вожак терновых',
     art: 'thornAlpha',
-    hp: 70, speed: 3.9, radius: 0.65, height: 1.7, touch: 2,
+    hp: 70, speed: 3.9, radius: 0.65, height: 1.7, touch: 1,
     cost: 4, weight: 0, elite: true, sight: 24, hear: 20,
     behavior: 'packHunter',
     params: { circle: 6.5, strikeEvery: 2.1, dashSpeed: 14, dashTime: 0.5, warn: 0.4, howl: true },
@@ -80,7 +80,7 @@ export const ENEMIES = {
   crawler: {
     name: 'Ползун',
     art: 'crawler',
-    hp: 24, speed: 3.0, radius: 0.5, height: 0.95, touch: 2,
+    hp: 24, speed: 3.0, radius: 0.5, height: 0.95, touch: 1,
     cost: 1.4, weight: 9, sight: 14, hear: 20,
     behavior: 'ambusher',
     params: { lungeRange: 7, lungeSpeed: 14, warn: 0.4, rest: 1.4 },
@@ -109,7 +109,7 @@ export const ENEMIES = {
   stalker: {
     name: 'Преследователь',
     art: 'stalker',
-    hp: 34, speed: 4.4, radius: 0.4, height: 2.0, touch: 2,
+    hp: 34, speed: 4.4, radius: 0.4, height: 2.0, touch: 1,
     cost: 2.4, weight: 6, sight: 26, hear: 26,
     behavior: 'hunter',
     params: { creepSpeed: 1.1, chargeRange: 9, chargeSpeed: 10, warn: 0.55, freezeWhenWatched: true },
@@ -117,7 +117,7 @@ export const ENEMIES = {
   burrower: {
     name: 'Землерой',
     art: 'burrower',
-    hp: 30, speed: 5.5, radius: 0.5, height: 1.1, touch: 2,
+    hp: 30, speed: 5.5, radius: 0.5, height: 1.1, touch: 1,
     cost: 2.2, weight: 5, sight: 16, hear: 24,
     behavior: 'burrower',
     params: { under: 2.2, over: 2.6, warn: 0.5 },
@@ -125,7 +125,7 @@ export const ENEMIES = {
   stalkerElite: {
     name: 'Тенекрад',
     art: 'stalkerElite',
-    hp: 90, speed: 5.2, radius: 0.5, height: 2.5, touch: 3,
+    hp: 90, speed: 5.2, radius: 0.5, height: 2.5, touch: 2,
     cost: 5, weight: 0, elite: true, sight: 30, hear: 30,
     behavior: 'hunter',
     params: { creepSpeed: 1.6, chargeRange: 12, chargeSpeed: 13, warn: 0.4, freezeWhenWatched: true },
@@ -144,7 +144,7 @@ export const ENEMIES = {
   forgeGolem: {
     name: 'Кузнечный голем',
     art: 'forgeGolem',
-    hp: 90, speed: 1.7, radius: 0.75, height: 2.3, touch: 3,
+    hp: 90, speed: 1.7, radius: 0.75, height: 2.3, touch: 2,
     cost: 3.2, weight: 6, sight: 18, hear: 14, armor: 2,
     behavior: 'slammer',
     params: { range: 2.8, windup: 0.85, slamRadius: 4.2, slamDamage: 3, cooldown: 2.4 },
@@ -152,7 +152,7 @@ export const ENEMIES = {
   slagHound: {
     name: 'Шлаковый пёс',
     art: 'slagHound',
-    hp: 34, speed: 4.2, radius: 0.5, height: 1.25, touch: 2,
+    hp: 34, speed: 4.2, radius: 0.5, height: 1.25, touch: 1,
     cost: 2, weight: 8, sight: 22, hear: 18,
     behavior: 'packHunter',
     params: { circle: 6, strikeEvery: 2.4, dashSpeed: 13, dashTime: 0.4, warn: 0.4 },
@@ -169,7 +169,7 @@ export const ENEMIES = {
   anvilTurret: {
     name: 'Наковальня-страж',
     art: 'anvilTurret',
-    hp: 46, speed: 0, radius: 0.6, height: 1.5, touch: 2,
+    hp: 46, speed: 0, radius: 0.6, height: 1.5, touch: 1,
     cost: 2.2, weight: 5, sight: 26, hear: 8, armor: 2,
     behavior: 'turret',
     shoot: { every: 2.6, warn: 0.6, speed: 16, damage: 2, count: 6, pattern: 'radial', color: [1, 0.75, 0.3] },
@@ -177,7 +177,7 @@ export const ENEMIES = {
   golemElite: {
     name: 'Домнный голем',
     art: 'golemElite',
-    hp: 190, speed: 2.1, radius: 0.95, height: 3.0, touch: 4,
+    hp: 190, speed: 2.1, radius: 0.95, height: 3.0, touch: 2,
     cost: 6, weight: 0, elite: true, sight: 22, hear: 18, armor: 3,
     behavior: 'slammer',
     params: { range: 3.4, windup: 0.7, slamRadius: 5.5, slamDamage: 3, cooldown: 1.9, ringShot: 8 },
@@ -187,7 +187,7 @@ export const ENEMIES = {
   lavaSlug: {
     name: 'Лавовый слизень',
     art: 'lavaSlug',
-    hp: 52, speed: 1.6, radius: 0.7, height: 1.2, touch: 3,
+    hp: 52, speed: 1.6, radius: 0.7, height: 1.2, touch: 2,
     cost: 2.2, weight: 8, sight: 14, hear: 12, lavaImmune: true,
     behavior: 'stalker',
     params: { accel: 5, trail: 'lava' },
@@ -197,7 +197,7 @@ export const ENEMIES = {
   pyroWisp: {
     name: 'Пиро-дух',
     art: 'pyroWisp',
-    hp: 24, speed: 5.2, radius: 0.3, height: 1.8, touch: 2,
+    hp: 24, speed: 5.2, radius: 0.3, height: 1.8, touch: 1,
     cost: 1.8, weight: 9, sight: 24, hear: 12, flying: true, lavaImmune: true,
     behavior: 'orbiter',
     params: { orbit: 6.5, orbitSpeed: 1.6 },
@@ -207,7 +207,7 @@ export const ENEMIES = {
   obsidianKnight: {
     name: 'Обсидиановый рыцарь',
     art: 'obsidianKnight',
-    hp: 110, speed: 2.6, radius: 0.55, height: 2.2, touch: 3,
+    hp: 110, speed: 2.6, radius: 0.55, height: 2.2, touch: 2,
     cost: 3.4, weight: 6, sight: 20, hear: 16, armor: 3,
     behavior: 'guard',
     params: { shieldArc: 2.0, turnRate: 1.9, advance: true, slashRange: 3.0, slashEvery: 3.2 },
@@ -215,7 +215,7 @@ export const ENEMIES = {
   geyserMouth: {
     name: 'Гейзерная пасть',
     art: 'geyserMouth',
-    hp: 60, speed: 0, radius: 0.8, height: 1.1, touch: 2,
+    hp: 60, speed: 0, radius: 0.8, height: 1.1, touch: 1,
     cost: 2.4, weight: 5, sight: 26, hear: 26, lavaImmune: true,
     behavior: 'geyser',
     params: { every: 3.2, warn: 0.9, radius: 3.0, damage: 3, count: 3 },
@@ -223,7 +223,7 @@ export const ENEMIES = {
   flameDancer: {
     name: 'Плясунья пламени',
     art: 'flameDancer',
-    hp: 46, speed: 4.6, radius: 0.4, height: 1.9, touch: 2,
+    hp: 46, speed: 4.6, radius: 0.4, height: 1.9, touch: 1,
     cost: 2.8, weight: 7, sight: 24, hear: 18,
     behavior: 'orbiter',
     params: { orbit: 7.5, orbitSpeed: 2.0 },
@@ -232,7 +232,7 @@ export const ENEMIES = {
   knightElite: {
     name: 'Магистр обсидиана',
     art: 'knightElite',
-    hp: 220, speed: 3.0, radius: 0.7, height: 2.8, touch: 4,
+    hp: 220, speed: 3.0, radius: 0.7, height: 2.8, touch: 2,
     cost: 6.5, weight: 0, elite: true, sight: 24, hear: 20, armor: 4,
     behavior: 'guard',
     params: { shieldArc: 2.3, turnRate: 2.2, advance: true, slashRange: 3.6, slashEvery: 2.2, chargeSlash: true },
@@ -252,7 +252,7 @@ export const ENEMIES = {
   gemGolem: {
     name: 'Самоцветный голем',
     art: 'gemGolem',
-    hp: 160, speed: 2.0, radius: 0.85, height: 2.6, touch: 3,
+    hp: 160, speed: 2.0, radius: 0.85, height: 2.6, touch: 2,
     cost: 4.2, weight: 6, sight: 20, hear: 16, armor: 3,
     behavior: 'slammer',
     params: { range: 3.2, windup: 0.8, slamRadius: 5.0, slamDamage: 3, cooldown: 2.1, ringShot: 10 },
@@ -261,7 +261,7 @@ export const ENEMIES = {
   hoardMimic: {
     name: 'Мимик клада',
     art: 'hoardMimic',
-    hp: 110, speed: 4.0, radius: 0.7, height: 1.3, touch: 4,
+    hp: 110, speed: 4.0, radius: 0.7, height: 1.3, touch: 2,
     cost: 3.2, weight: 6, sight: 8, hear: 8,
     behavior: 'mimic',
     params: { revealRange: 3.2, lungeSpeed: 13 },
@@ -269,7 +269,7 @@ export const ENEMIES = {
   shardHound: {
     name: 'Осколочный пёс',
     art: 'shardHound',
-    hp: 46, speed: 5.2, radius: 0.48, height: 1.2, touch: 2,
+    hp: 46, speed: 5.2, radius: 0.48, height: 1.2, touch: 1,
     cost: 2.4, weight: 8, sight: 24, hear: 20,
     behavior: 'packHunter',
     params: { circle: 6, strikeEvery: 1.9, dashSpeed: 15, dashTime: 0.35, warn: 0.35 },
@@ -277,7 +277,7 @@ export const ENEMIES = {
   dragonWhelp: {
     name: 'Дракончик',
     art: 'dragonWhelp',
-    hp: 80, speed: 4.0, radius: 0.6, height: 1.6, touch: 3,
+    hp: 80, speed: 4.0, radius: 0.6, height: 1.6, touch: 2,
     cost: 3.6, weight: 6, sight: 26, hear: 18, flying: true,
     behavior: 'kiter',
     params: { keep: 10, flee: 6 },
@@ -286,7 +286,7 @@ export const ENEMIES = {
   mimicKing: {
     name: 'Король мимиков',
     art: 'mimicKing',
-    hp: 260, speed: 4.6, radius: 1.0, height: 2.0, touch: 4,
+    hp: 260, speed: 4.6, radius: 1.0, height: 2.0, touch: 2,
     cost: 7, weight: 0, elite: true, sight: 10, hear: 10,
     behavior: 'mimic',
     params: { revealRange: 4.2, lungeSpeed: 15, slam: true },

@@ -33,9 +33,10 @@ export function boot(canvas) {
   const saved = platform.storage.load(SAVE_KEY);
   game.best = saved && saved.best ? saved.best : null;
   if (saved && saved.settings) Object.assign(game.settings, saved.settings);
-  platform.input.setSensitivity(game.settings.sensitivity);
 
   wireAudio(game, platform);
+  wireMenu(game, platform);
+  applySettings(game, platform);
 
   let audioUnlocked = false;
   function unlock() {
@@ -55,6 +56,7 @@ export function boot(canvas) {
     platform.input.releaseLock();
     saveProgress(platform, game);
   });
+  game.events.on('pause', () => platform.input.releaseLock());
   game.events.on('bossDown', () => saveProgress(platform, game));
 
   const loop = new FixedLoop({
@@ -101,6 +103,67 @@ function wireAudio(game, platform) {
   game.events.on('runStart', () => platform.audio.setMusic(currentTrack(game)));
 }
 
+/**
+ * Push the settings object at the adapters that care. Called once at boot and
+ * whenever a menu row changes something, so there is one place where a setting
+ * turns into an effect.
+ */
+function applySettings(game, platform) {
+  const s = game.settings;
+  platform.input.setSensitivity(s.sensitivity);
+  if (platform.input.setInvertY) platform.input.setInvertY(s.invertY);
+  platform.audio.setMasterVolume(s.master);
+  platform.audio.setMusicVolume(s.music);
+  platform.audio.setSfxVolume(s.sfx);
+}
+
+/**
+ * Menu rows never touch the host directly: they emit a command and the shell
+ * decides what that means here. That is what keeps `src/core/ui` runnable in
+ * the test harness with no browser at all.
+ */
+function wireMenu(game, platform) {
+  game.events.on('settingsChanged', () => {
+    applySettings(game, platform);
+    saveSettings(platform, game);
+  });
+
+  game.events.on('uiCommand', ({ name }) => {
+    switch (name) {
+      case 'newRun':
+        game.startRun();
+        platform.audio.resume();
+        platform.audio.setMusic(currentTrack(game));
+        platform.input.requestLock();
+        break;
+      case 'resume':
+        if (game.state === STATE.PAUSED) game.togglePause();
+        platform.input.requestLock();
+        break;
+      case 'quitToTitle':
+        game.toTitle();
+        platform.input.releaseLock();
+        platform.audio.setMusic('title');
+        platform.audio.setAmbience(null);
+        break;
+      case 'toggleFullscreen':
+        platform.display.toggleFullscreen();
+        break;
+      case 'resetSettings':
+        game.resetSettings();
+        break;
+      default:
+        break;
+    }
+  });
+}
+
+function saveSettings(platform, game) {
+  const prev = platform.storage.load(SAVE_KEY) || {};
+  prev.settings = game.settings;
+  platform.storage.save(SAVE_KEY, prev);
+}
+
 function saveProgress(platform, game) {
   const prev = platform.storage.load(SAVE_KEY) || {};
   const best = prev.best || { floor: 0, kills: 0 };
@@ -123,41 +186,34 @@ function shellInput(game, platform, input) {
   if (input.pressed.debug) game.debug = !game.debug;
   if (input.pressed.interact) game.interactPressed = true;
 
-  switch (game.state) {
-    case STATE.TITLE:
-      if (input.pressed.confirm || input.pressed.fire || input.pressed.interact) {
-        game.startRun();
-        platform.audio.resume();
-        platform.audio.setMusic(currentTrack(game));
-        platform.input.requestLock();
-      }
-      break;
-    case STATE.DEAD:
-    case STATE.WIN:
-      if (input.pressed.confirm || input.pressed.interact) {
-        game.startRun();
-        platform.audio.setMusic(currentTrack(game));
-        platform.input.requestLock();
-      }
-      break;
-    case STATE.PAUSED:
-      if (input.pressed.pause || input.pressed.cancel) {
-        game.togglePause();
-        platform.input.requestLock();
-      }
-      if (input.pressed.restart) {
-        game.startRun();
-        platform.input.requestLock();
-      }
-      break;
-    default:
-      if (input.pressed.pause) {
-        game.togglePause();
-        platform.input.releaseLock();
-      }
-      if (input.pressed.map) game.showMap = !game.showMap;
-      // Clicking back into the window re-captures the mouse.
-      if (input.pressed.fire && !input.pointerLocked) platform.input.requestLock();
-      break;
+  // Menus own their own navigation inside the core; the shell only has to make
+  // sure the pointer is free while one is up and captured while it is not.
+  if (game.menu.open) {
+    platform.input.setLockWanted(false);
+    if (platform.input.isLocked && platform.input.isLocked()) platform.input.releaseLock();
+    return;
+  }
+
+  if (game.state === STATE.PLAYING) {
+    if (input.pressed.pause) {
+      // Consume the edge: the pause menu opens inside the very same step, and
+      // it reads Escape as "back", which would close it again immediately.
+      input.pressed.pause = false;
+      game.togglePause();
+      platform.input.releaseLock();
+      return;
+    }
+    if (input.pressed.map) game.showMap = !game.showMap;
+    if (input.pressed.restart) {
+      // R is the roguelike reflex. It goes to the confirmation rather than
+      // straight to a new run: losing a good descent to a mistyped key is
+      // worse than one extra keypress.
+      game.togglePause();
+      game.menu.show('pause');
+      game.menu.push('confirmRestart');
+      platform.input.releaseLock();
+      return;
+    }
+    platform.input.setLockWanted(true);
   }
 }

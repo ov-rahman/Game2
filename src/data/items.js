@@ -15,7 +15,7 @@
  */
 
 export const BASE_STATS = {
-  maxHp: 6,
+  maxHp: 8,
   damage: 4.2,
   damageMult: 1,
   fireRate: 3.4,          // shots per second
@@ -26,8 +26,8 @@ export const BASE_STATS = {
   armor: 0,
   critChance: 0.05,
   critMult: 2.2,
-  heatPerShot: 0.055,     // overheat replaces ammo entirely
-  heatCooling: 0.55,
+  heatPerShot: 0.075,     // overheat replaces ammo entirely
+  heatCooling: 0.5,
   torchDrain: 0.011,      // battery per second while lit
   torchRange: 17,
   pickupRange: 2.2,
@@ -535,7 +535,7 @@ export const ACTIVES = {
     desc: 'Восстанавливает здоровье.',
     charge: 3,
     use(ctx) {
-      return ctx.game.healPlayer(4) > 0;
+      return ctx.game.healPlayer(Math.max(4, Math.round(ctx.player.stats.maxHp * 0.6))) > 0;
     },
   },
   timeDilation: {

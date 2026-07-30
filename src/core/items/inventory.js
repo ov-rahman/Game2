@@ -19,6 +19,7 @@ const HOOK_NAMES = [
   'onHurt',
   'onContact',
   'onRoomEnter',
+  'onRoomClear',
   'onFloorStart',
   'onUpdate',
 ];
@@ -111,6 +112,9 @@ export function setActive(player, id) {
 export function recomputeStats(game, player) {
   const s = Object.assign({}, BASE_STATS);
   const flags = Object.create(null);
+  // Health earned by killing floor owners, kept outside the item system so it
+  // survives every recompute.
+  s.maxHp += player.bonusHp || 0;
 
   // The weapon goes first and *replaces* rather than adds: it is not a bonus,
   // it is what you are holding. Everything after it modifies what it left.
@@ -142,6 +146,13 @@ export function recomputeStats(game, player) {
 
   const ctx = { game, player, stats: s, flags };
   for (const fn of player.inv.hooks.onStats || []) fn(ctx);
+  // Synergies that grant a standing ability rather than changing a volley.
+  // They have to run here: `flags` is rebuilt from scratch on every recompute,
+  // so anything set outside this function is erased the next time the player
+  // takes a hit or a timer expires.
+  for (const syn of player.inv.synergies) {
+    if (syn.passive) syn.passive(ctx);
+  }
 
   // Clamp so no combination can break the game.
   s.maxHp = Math.max(2, Math.round(s.maxHp));

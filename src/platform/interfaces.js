@@ -19,6 +19,8 @@
  * @property {Object<string,boolean>} pressed Rising edge per action, valid for one tick.
  * @property {boolean} pointerLocked
  * @property {boolean} gamepad
+ * @property {{x:number,y:number,active:boolean}} cursor Pointer position in
+ *           internal render coordinates, for menus. Inactive while locked.
  */
 
 /**
@@ -27,6 +29,8 @@
  * @property {() => void} endTick        Clear per-tick edges once consumed.
  * @property {() => void} requestLock    Ask the host to capture the pointer.
  * @property {() => void} releaseLock
+ * @property {(v:boolean) => void} setLockWanted Does gameplay want the pointer?
+ *           While set, clicking the surface re-captures instead of firing.
  * @property {(v:number) => void} setSensitivity
  * @property {() => void} dispose
  */
@@ -67,7 +71,7 @@
  */
 
 const REQUIRED = {
-  input: ['sample', 'endTick', 'requestLock'],
+  input: ['sample', 'endTick', 'requestLock', 'releaseLock', 'setLockWanted'],
   audio: ['play', 'setMusic', 'setMasterVolume', 'resume'],
   storage: ['load', 'save', 'remove'],
   display: ['size', 'createSurface', 'onResize'],
@@ -110,4 +114,11 @@ export const ACTIONS = [
   'fullscreen',
   'restart',
   'debug',
+  // Menu navigation. Kept separate from movement so a screen can be driven by
+  // the same keys, the D-pad and a stick without any of them fighting.
+  'menuUp',
+  'menuDown',
+  'menuLeft',
+  'menuRight',
+  'click',
 ];

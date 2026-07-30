@@ -405,6 +405,62 @@ function uvVariant8(uv, hash) {
 }
 
 /**
+ * The way down: a shaft cut into the floor with descending steps, framed by a
+ * glowing lip. Collision still treats the cell as flat ground — the player
+ * stands on the top step and presses E.
+ */
+function buildStairwell(base, glow, x0, z0, uvStairs, uvPanel, uvCrystal, tint, trim) {
+  const STEPS = 5;
+  const depth = 1.7;
+  const dark = [0.14, 0.14, 0.16];
+
+  // Shaft walls and bottom, so the hole does not show the void behind it.
+  const x1 = x0 + CELL;
+  const z1 = z0 + CELL;
+  base.quad(
+    [x0, -depth, z0], [x1, -depth, z0], [x1, -depth, z1], [x0, -depth, z1],
+    [0, 1, 0], uvPanel, dark, [0.4, 0.4, 0.4, 0.4],
+  );
+  const sides = [
+    [[x0, 0, z0], [x1, 0, z0], [x1, -depth, z0], [x0, -depth, z0], [0, 0, 1]],
+    [[x1, 0, z1], [x0, 0, z1], [x0, -depth, z1], [x1, -depth, z1], [0, 0, -1]],
+    [[x1, 0, z0], [x1, 0, z1], [x1, -depth, z1], [x1, -depth, z0], [-1, 0, 0]],
+    [[x0, 0, z1], [x0, 0, z0], [x0, -depth, z0], [x0, -depth, z1], [1, 0, 0]],
+  ];
+  for (const [a, b, c, d, nrm] of sides) {
+    base.quad(a, b, c, d, nrm, uvPanel, dark, [0.75, 0.75, 0.25, 0.25]);
+  }
+
+  // Steps marching down along +X, lit normally so the torch picks them out
+  // when the player leans over the edge.
+  const stepW = CELL / STEPS;
+  for (let i = 0; i < STEPS; i++) {
+    const cx = x0 + stepW * (i + 0.5);
+    const top = -(depth * (i + 1)) / (STEPS + 1);
+    const fade = 1 - i * 0.12;
+    base.box(
+      cx, top - 0.12, z0 + CELL / 2, stepW, 0.24, CELL * 0.86,
+      uvStairs, [tint[0] * fade, tint[1] * fade, tint[2] * fade], 1,
+    );
+  }
+
+  // Glowing lip around the opening — the landmark you steer toward.
+  const lip = 0.3;
+  const frames = [
+    [x0, z0, CELL, lip],
+    [x0, z1 - lip, CELL, lip],
+    [x0, z0 + lip, lip, CELL - lip * 2],
+    [x1 - lip, z0 + lip, lip, CELL - lip * 2],
+  ];
+  for (const [fx, fz, fw, fd] of frames) {
+    glow.quad(
+      [fx, 0.03, fz], [fx + fw, 0.03, fz], [fx + fw, 0.03, fz + fd], [fx, 0.03, fz + fd],
+      [0, 1, 0], uvCrystal, trim, [1, 1, 1, 1],
+    );
+  }
+}
+
+/**
  * @returns {{ solid: Float32Array, glow: Float32Array }}
  */
 export function buildLevelMesh(dungeon, floorDef) {
@@ -559,14 +615,14 @@ export function buildLevelMesh(dungeon, floorDef) {
       }
 
       // ---- floor -------------------------------------------------------
-      if (!isPit) {
+      if (isStairs) {
+        // A real stairwell, not a flat tile: the way down has to be findable
+        // from across a dark room, so it is cut into the floor and glows.
+        buildStairwell(base, glow, x0, z0, uvStairs, uvPanel, uvCrystal, pal.stairs, pal.trim);
+      } else if (!isPit) {
         const target = isHazard ? liquid : base;
-        const uv = isStairs
-          ? uvStairs
-          : isHazard
-            ? uvHazard
-            : uvVariant(style.floor, hash);
-        const tint = isHazard ? pal.hazard : isStairs ? pal.stairs : style.floorTint;
+        const uv = isHazard ? uvHazard : uvVariant(style.floor, hash);
+        const tint = isHazard ? pal.hazard : style.floorTint;
         const drop = isHazard ? 0.06 : 0;
 
         const n = solid(cells, gx, gy - 1);

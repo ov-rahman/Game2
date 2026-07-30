@@ -6,8 +6,9 @@
  * grain and scanlines as the world instead of floating cleanly on top of it.
  * That single decision is most of why the overlay reads as part of the image.
  */
-import { RENDER_W, RENDER_H } from '../core/constants.js';
+import { RENDER_W, RENDER_H, CELL } from '../core/constants.js';
 import { STATE } from '../core/game.js';
+import { ROW_H } from '../core/ui/menu.js';
 import { clamp } from '../core/math3.js';
 import { WEAPONS, RELICS, STARTING_WEAPON, rarityOf } from '../data/gear.js';
 
@@ -68,22 +69,129 @@ export class HudPainter {
 
     switch (g.state) {
       case STATE.TITLE:
-        this.paintTitle();
-        return;
+        this.paintTitleBackdrop();
+        break;
       case STATE.DEAD:
         this.paintPlay();
-        this.paintDeath();
-        return;
+        this.paintDeathBackdrop();
+        break;
       case STATE.WIN:
-        this.paintWin();
-        return;
+        this.paintWinBackdrop();
+        break;
       case STATE.PAUSED:
         this.paintPlay();
-        this.paintPause();
-        return;
+        this.paintPauseBackdrop();
+        break;
       default:
         this.paintPlay();
     }
+
+    if (g.menu && g.menu.open) this.paintMenu(g.menu);
+  }
+
+  // ------------------------------------------------------------------ menu
+
+  /**
+   * Draws whatever screen the menu has on top, and hands the row rectangles
+   * back so clicks land on what the player can see.
+   */
+  paintMenu(menu) {
+    const ctx = this.ctx;
+    const screen = menu.screen;
+    if (!screen) return;
+    const rows = screen.rows;
+
+    // The title screen already spells the game's name across the backdrop;
+    // repeating it inside the panel just wastes the panel.
+    // The title, death and victory backdrops already spell out the same
+    // heading in large type; repeating it inside the panel wastes the panel.
+    const st = this.game.state;
+    const bare = menu.stack.length === 1
+      && (st === STATE.TITLE || st === STATE.DEAD || st === STATE.WIN);
+    const heading = bare ? '' : screen.title;
+    const subtitle = bare ? '' : screen.subtitle;
+    const headH = (heading ? 20 : 6) + (subtitle ? 10 : 0);
+    const bodyH = rows.reduce((a, r) => a + (r.kind === 'note' ? (r.label ? 9 : 4) : ROW_H), 0);
+    const hintH = 11;
+
+    const w = 244;
+    const h = Math.min(RENDER_H - 12, headH + bodyH + hintH + 8);
+    const x = Math.round((RENDER_W - w) / 2);
+    const y = Math.round(Math.min(RENDER_H - h - 6, (RENDER_H - h) * 0.62));
+
+    this.panel(x, y, w, h);
+    if (heading) {
+      this.text(heading, RENDER_W / 2, y + 15, {
+        align: 'center', size: 12, color: '#d8e0c8',
+      });
+    }
+    if (subtitle) {
+      this.text(subtitle, RENDER_W / 2, y + headH - 2, {
+        align: 'center', size: 6, color: '#7f8c80',
+      });
+    }
+
+    const layout = [];
+    let ry = y + headH + 4;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const on = i === menu.index && row.kind !== 'note';
+      const cx = x + 14;
+      const rw = w - 28;
+
+      if (row.kind === 'note') {
+        if (row.label) {
+          this.text(row.label, RENDER_W / 2, ry + 6, {
+            align: 'center', size: 6, color: 'rgba(150,168,155,0.8)',
+          });
+        }
+        ry += row.label ? 9 : 4;
+        continue;
+      }
+
+      if (on) {
+        ctx.fillStyle = 'rgba(150,190,150,0.16)';
+        ctx.fillRect(cx - 4, ry - 1, rw + 8, ROW_H - 2);
+        this.text('›', cx - 9, ry + 8, { size: 8, color: '#d8c88a' });
+      }
+
+      this.text(row.label, cx, ry + 8, {
+        size: 7,
+        color: on ? '#f0efd8' : '#a8b8a8',
+      });
+
+      // Sliders get a bar as well as a number: the number alone is unreadable
+      // at this resolution while you are dragging it.
+      const fill = menu.sliderFill(row);
+      if (fill >= 0) {
+        const bw = 52;
+        const bx = x + w - 46 - bw;
+        const by = ry + 4;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(bx - 1, by - 1, bw + 2, 5);
+        ctx.fillStyle = on ? '#d8c88a' : '#6f7a68';
+        ctx.fillRect(bx, by, Math.round(bw * Math.max(0, Math.min(1, fill))), 3);
+        this.text(menu.valueText(row), x + w - 14, ry + 8, {
+          align: 'right', size: 6, color: on ? '#f0efd8' : '#8a9a8a',
+        });
+      } else {
+        const value = menu.valueText(row);
+        if (value) {
+          this.text(value, x + w - 14, ry + 8, {
+            align: 'right', size: 7, color: on ? '#d8c88a' : '#8a9a8a',
+          });
+        }
+      }
+
+      layout.push({ index: i, x: cx - 6, y: ry - 1, w: rw + 12, h: ROW_H - 1 });
+      ry += ROW_H;
+    }
+
+    menu.setLayout(layout);
+
+    this.text('↑↓ выбор    ←→ значение    ENTER — ок    ESC — назад', RENDER_W / 2, y + h - 4, {
+      align: 'center', size: 6, color: 'rgba(180,195,180,0.5)',
+    });
   }
 
   // ------------------------------------------------------------------ play
@@ -92,7 +200,8 @@ export class HudPainter {
     const g = this.game;
     const ctx = this.ctx;
     const p = g.player;
-    if (!p) return;
+    // Before the first run the player exists but has no aggregated stats yet.
+    if (!p || !p.stats) return;
 
     this.paintCrosshair();
 
@@ -175,7 +284,9 @@ export class HudPainter {
       );
     }
 
-    // --- floor label ------------------------------------------------------
+    // --- floor label and objective ---------------------------------------
+    // Stacked on the left rather than one centred and one left-aligned: the
+    // longest floor name runs straight through a centred objective line.
     const def = g.floorDef;
     if (def) {
       const label = `${def.index}/5  ${def.name}`;
@@ -186,12 +297,11 @@ export class HudPainter {
     // --- objective --------------------------------------------------------
     // On its own line under the floor label. Sharing a line worked until a
     // floor was called "ПРИЗМАТИЧЕСКАЯ СОКРОВИЩНИЦА" and the two ran through
-    // each other.
-    const bossUp = g.enemies.some((e) => e.isBoss && e.alive && !e.dormant);
-    if (g.objective && !bossUp) {
-      const oy = 26;
-      this.plate(RENDER_W / 2 - g.objective.length * 3 - 6, oy - 10, g.objective.length * 6 + 12, 14, 0.4);
-      this.text(g.objective, RENDER_W / 2, oy, { align: 'center', color: '#d8c68a' });
+    // each other. Left-aligned so it can never reach the boss bar, on a plate
+    // so the dither does not eat it.
+    if (g.objective) {
+      this.plate(4, 16, g.objective.length * 5.1 + 12, 12, 0.38);
+      this.text(g.objective, 10, 25, { size: 6, color: '#c8b878' });
     }
 
     // --- boss bar ---------------------------------------------------------
@@ -260,41 +370,82 @@ export class HudPainter {
     const g = this.game;
     const d = g.dungeon;
     if (!d) return;
-    const scale = 2;
-    const w = d.width * scale;
-    const h = d.height * scale;
-    const ox = (RENDER_W - w) / 2;
-    const oy = (RENDER_H - h) / 2;
 
-    ctx.fillStyle = 'rgba(4,6,5,0.86)';
+    ctx.fillStyle = 'rgba(4,6,5,0.92)';
     ctx.fillRect(0, 0, RENDER_W, RENDER_H);
 
-    for (const room of d.rooms) {
-      if (!room.seen) continue;
-      ctx.fillStyle =
-        room.kind === 'boss' ? 'rgba(200,70,60,0.75)'
-        : room.kind === 'shop' ? 'rgba(90,180,220,0.7)'
-        : room.kind === 'treasure' ? 'rgba(220,190,90,0.7)'
-        : 'rgba(120,150,130,0.55)';
-      ctx.fillRect(ox + room.x * scale, oy + room.y * scale, room.w * scale, room.h * scale);
+    // Fit the part of the grid the level actually occupies, not the whole
+    // 56x56 array — most of it is untouched rock, and scaling to it left the
+    // map as a thumbnail in the middle of an empty screen.
+    let minX = d.width;
+    let minY = d.height;
+    let maxX = 0;
+    let maxY = 0;
+    for (const r of d.rooms) {
+      minX = Math.min(minX, r.x - 1);
+      minY = Math.min(minY, r.y - 1);
+      maxX = Math.max(maxX, r.x + r.w + 1);
+      maxY = Math.max(maxY, r.y + r.h + 1);
     }
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    const boxW = RENDER_W - 40;
+    const boxH = RENDER_H - 46;
+    const scale = Math.max(2, Math.floor(Math.min(boxW / spanX, boxH / spanY)));
+    const ox = Math.round((RENDER_W - spanX * scale) / 2 - minX * scale);
+    const oy = Math.round((RENDER_H - spanY * scale) / 2 - minY * scale + 4);
+
     // Corridors the player has actually walked.
-    ctx.fillStyle = 'rgba(90,110,100,0.5)';
+    ctx.fillStyle = 'rgba(86,104,94,0.6)';
     for (const c of g.exploredCells) {
       const gx = c % d.width;
       const gy = (c / d.width) | 0;
       ctx.fillRect(ox + gx * scale, oy + gy * scale, scale, scale);
     }
 
-    const p = g.player;
-    ctx.fillStyle = '#e8f0d8';
-    ctx.fillRect(ox + (p.x / 4) * scale - 1, oy + (p.z / 4) * scale - 1, 3, 3);
-
-    if (d.stairs.active) {
-      ctx.fillStyle = '#8fe8b0';
-      ctx.fillRect(ox + d.stairs.gx * scale - 1, oy + d.stairs.gy * scale - 1, 3, 3);
+    for (const room of d.rooms) {
+      if (!room.seen) continue;
+      ctx.fillStyle =
+        room.kind === 'boss' ? 'rgba(200,70,60,0.8)'
+        : room.kind === 'shop' ? 'rgba(90,180,220,0.75)'
+        : room.kind === 'treasure' ? 'rgba(220,190,90,0.75)'
+        : room.kind === 'challenge' ? 'rgba(180,120,220,0.7)'
+        : 'rgba(120,150,130,0.6)';
+      ctx.fillRect(ox + room.x * scale, oy + room.y * scale, room.w * scale, room.h * scale);
+      if (room.cleared) {
+        ctx.strokeStyle = 'rgba(220,240,210,0.35)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(ox + room.x * scale + 0.5, oy + room.y * scale + 0.5,
+          room.w * scale - 1, room.h * scale - 1);
+      }
     }
-    this.text('КАРТА  —  TAB', RENDER_W / 2, oy - 8, { align: 'center', size: 7, color: '#8fa898' });
+
+    // The way down, once it is open.
+    const st = d.stairs;
+    if (st.active) {
+      const sx = ox + st.gx * scale;
+      const sy = oy + st.gy * scale;
+      ctx.fillStyle = '#8fe8b0';
+      ctx.fillRect(sx - 1, sy - 1, scale + 2, scale + 2);
+    }
+
+    // Player position and facing: a dot alone does not tell you which way you
+    // are pointing, which is the one thing a map in a dark game is for.
+    const p = g.player;
+    const px = ox + (p.x / CELL) * scale;
+    const py = oy + (p.z / CELL) * scale;
+    ctx.fillStyle = '#e8f0d8';
+    ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
+    ctx.strokeStyle = '#e8f0d8';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + Math.sin(p.yaw) * scale * 1.6, py + Math.cos(p.yaw) * scale * 1.6);
+    ctx.stroke();
+
+    this.text('КАРТА  —  TAB', RENDER_W / 2, 12, { align: 'center', size: 7, color: '#8fa898' });
+    const legend = st.active ? 'зелёное — лестница' : 'красное — логово';
+    this.text(legend, RENDER_W / 2, RENDER_H - 6, { align: 'center', size: 6, color: '#6f7a68' });
   }
 
   paintDebug() {
@@ -325,128 +476,122 @@ export class HudPainter {
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
 
-  paintTitle() {
+  paintTitleBackdrop() {
     const ctx = this.ctx;
     ctx.fillStyle = '#050706';
     ctx.fillRect(0, 0, RENDER_W, RENDER_H);
 
     const flick = 0.75 + 0.25 * Math.sin(this.time * 7) * Math.sin(this.time * 2.3);
     ctx.globalAlpha = flick;
-    this.text('ГЛУБИНА', RENDER_W / 2, 74, { align: 'center', size: 30, color: '#c8d8c0', weight: 'bold' });
+    this.text('ГЛУБИНА', RENDER_W / 2, 46, { align: 'center', size: 30, color: '#c8d8c0', weight: 'bold' });
     ctx.globalAlpha = 1;
-    this.text('спуск на пять этажей', RENDER_W / 2, 90, { align: 'center', size: 8, color: '#7a8c80' });
-
-    const pulse = 0.5 + 0.5 * Math.sin(this.time * 3);
-    ctx.globalAlpha = 0.55 + 0.45 * pulse;
-    this.text('НАЖМИ, ЧТОБЫ НАЧАТЬ', RENDER_W / 2, 132, { align: 'center', size: 9, color: '#d8c88a' });
-    ctx.globalAlpha = 1;
-
-    const lines = [
-      'WASD — идти      мышь — смотреть      ЛКМ — стрелять',
-      'SHIFT — бежать   CTRL — присесть      F — фонарь',
-      'E — взять        Q — предмет          TAB — карта',
-      'ESC — пауза      F11 — полный экран',
-    ];
-    lines.forEach((l, i) => {
-      this.text(l, RENDER_W / 2, 162 + i * 11, { align: 'center', size: 7, color: 'rgba(160,180,165,0.85)' });
-    });
+    this.text('спуск на пять этажей', RENDER_W / 2, 60, { align: 'center', size: 8, color: '#7a8c80' });
 
     if (this.game.best) {
+      const b = this.game.best;
       this.text(
-        `лучший спуск: этаж ${this.game.best.floor}   убийств ${this.game.best.kills}`,
-        RENDER_W / 2,
-        RENDER_H - 12,
+        `лучший спуск: этаж ${b.floor}   убийств ${b.kills}`,
+        RENDER_W / 2, 76,
         { align: 'center', size: 7, color: '#a89858' },
       );
     }
   }
 
-  paintPause() {
+  paintPauseBackdrop() {
     const ctx = this.ctx;
     const g = this.game;
-    ctx.fillStyle = 'rgba(4,6,5,0.8)';
+    ctx.fillStyle = 'rgba(4,6,5,0.86)';
     ctx.fillRect(0, 0, RENDER_W, RENDER_H);
-    const w = 240;
-    const h = 150;
-    const x = (RENDER_W - w) / 2;
-    const y = (RENDER_H - h) / 2;
-    this.panel(x, y, w, h);
-    this.text('ПАУЗА', RENDER_W / 2, y + 20, { align: 'center', size: 14, color: '#d8e0c8' });
 
+    // The run at a glance, above the menu: what this build actually does. It
+    // gets its own panel because the playing HUD is still drawn underneath.
     const p = g.player;
+    if (!p || !p.stats) return;
     const st = p.stats;
+    const pw = 300;
+    const px = Math.round((RENDER_W - pw) / 2);
+    const py = 8;
+    const ph = 82;
+    this.panel(px, py, pw, ph);
+
+    this.text(`ЭТАЖ ${g.floorIndex}/5  ${g.floorDef ? g.floorDef.name : ''}`, px + 10, py + 12, {
+      size: 7, color: '#c8d8c0',
+    });
+    this.text(g.difficulty().name, px + pw - 10, py + 12, {
+      size: 6, color: '#7f8c80', align: 'right',
+    });
+
     const rows = [
       ['урон', (st.damage * st.damageMult).toFixed(1)],
       ['темп стрельбы', st.fireRate.toFixed(2)],
-      ['скорость', st.moveSpeed.toFixed(1)],
+      ['скорость', st.moveSpeed.toFixed(2)],
       ['броня', st.armor.toFixed(0)],
       ['крит', `${(st.critChance * 100).toFixed(0)}%`],
-      ['фонарь', `${Math.round(g.torch.charge * 100)}%`],
+      ['здоровье', `${Math.ceil(p.hp)}/${st.maxHp}`],
+      ['предметов', String(p.inv.items.length)],
+      ['убийств', String(g.stats.kills)],
     ];
+    const colW = (pw - 20) / 2;
     rows.forEach((r, i) => {
       const col = i % 2;
       const row = (i / 2) | 0;
-      this.text(r[0], x + 16 + col * 112, y + 42 + row * 12, { size: 7, color: '#8fa898' });
-      this.text(r[1], x + 100 + col * 112, y + 42 + row * 12, { size: 7, color: '#d8e0c8', align: 'right' });
+      const lx = px + 10 + col * colW;
+      this.text(r[0], lx, py + 24 + row * 9, { size: 6, color: '#7f8c80' });
+      this.text(r[1], lx + colW - 8, py + 24 + row * 9, {
+        size: 6, color: '#d8e0c8', align: 'right',
+      });
     });
 
-    let sy = y + 86;
-    this.text('связки:', x + 16, sy, { color: '#8fd66a' });
-    sy += 11;
+    const sy = py + ph - 18;
+    this.text('связки:', px + 10, sy, { size: 6, color: '#8fd66a' });
     if (!p.inv.synergies.length) {
-      this.text('— пока нет —', x + 20, sy, { color: '#7f8a80' });
-      sy += 11;
+      this.text('— пока нет —', px + 44, sy, { size: 6, color: '#5f6a60' });
     } else {
-      for (const s of p.inv.synergies.slice(0, 3)) {
-        this.text(`★ ${s.name}`, x + 20, sy, { color: '#a8d8a0' });
-        sy += 10;
-      }
+      this.text(p.inv.synergies.map((s2) => s2.name).join(', ').slice(0, 62), px + 44, sy, {
+        size: 6, color: '#a8d8a0',
+      });
     }
 
     // Relics get their own line: they are the ones that changed a rule.
-    if (p.inv.relics.length) {
-      sy += 3;
-      this.text('реликвии:', x + 16, sy, { color: rarityOf(5).hud });
-      sy += 11;
-      for (const id of p.inv.relics.slice(0, 3)) {
-        const rel = RELICS[id];
-        if (rel) this.text(`❖ ${rel.name}`, x + 20, sy, { color: '#e8dca8' });
-        sy += 10;
-      }
+    const ry = py + ph - 6;
+    this.text('реликвии:', px + 10, ry, { size: 6, color: rarityOf(5).hud });
+    if (!p.inv.relics.length) {
+      this.text('— пока нет —', px + 44, ry, { size: 6, color: '#5f6a60' });
+    } else {
+      const names = p.inv.relics.map((id) => (RELICS[id] ? RELICS[id].name : id));
+      this.text(names.join(', ').slice(0, 62), px + 44, ry, { size: 6, color: '#e8dca8' });
     }
-    this.text('ESC — продолжить    R — заново', RENDER_W / 2, y + h - 10, {
-      align: 'center', size: 7, color: 'rgba(200,210,195,0.6)',
-    });
   }
 
-  paintDeath() {
+  paintDeathBackdrop() {
     const ctx = this.ctx;
     const g = this.game;
-    ctx.fillStyle = 'rgba(20,3,3,0.82)';
+    ctx.fillStyle = 'rgba(20,3,3,0.93)';
     ctx.fillRect(0, 0, RENDER_W, RENDER_H);
-    const w = 220;
-    const h = 116;
-    const x = (RENDER_W - w) / 2;
-    const y = (RENDER_H - h) / 2;
-    this.panel(x, y, w, h);
-    this.text('СИГНАЛ ПОТЕРЯН', RENDER_W / 2, y + 24, { align: 'center', size: 15, color: '#e08070' });
-    const s = g.stats;
+    this.text('СИГНАЛ ПОТЕРЯН', RENDER_W / 2, 30, { align: 'center', size: 15, color: '#e08070' });
+    this.paintRunStats('#a08880', '#e0d0c8');
+  }
+
+  /** The numbers that describe a finished run. */
+  paintRunStats(labelColor, valueColor) {
+    const s = this.game.stats;
     const rows = [
+      ['сложность', this.game.difficulty().name],
       ['этаж', `${s.floorReached} / 5`],
-      ['убийств', s.kills],
-      ['предметов', s.itemsTaken],
+      ['убийств', String(s.kills)],
+      ['предметов', String(s.itemsTaken)],
+      ['комнат зачищено', String(s.roomsCleared)],
       ['время', `${Math.floor(s.time / 60)}:${String(Math.floor(s.time % 60)).padStart(2, '0')}`],
     ];
     rows.forEach((r, i) => {
-      this.text(r[0], x + 20, y + 46 + i * 12, { size: 7, color: '#a08880' });
-      this.text(String(r[1]), x + w - 20, y + 46 + i * 12, { size: 7, color: '#e0d0c8', align: 'right' });
+      const y = 46 + i * 10;
+      this.text(r[0], RENDER_W / 2 - 66, y, { size: 7, color: labelColor });
+      this.text(r[1], RENDER_W / 2 + 66, y, { size: 7, color: valueColor, align: 'right' });
     });
-    this.text('ENTER — новый спуск', RENDER_W / 2, y + h - 10, { align: 'center', size: 8, color: '#d8c88a' });
   }
 
-  paintWin() {
+  paintWinBackdrop() {
     const ctx = this.ctx;
-    const g = this.game;
     ctx.fillStyle = '#07060c';
     ctx.fillRect(0, 0, RENDER_W, RENDER_H);
     const cols = ['#ff4fa3', '#4fe1ff', '#ffe14f', '#7cff6b'];
@@ -461,18 +606,7 @@ export class HudPainter {
       ctx.fillStyle = grd;
       ctx.fillRect(0, 0, RENDER_W, RENDER_H);
     }
-    this.text('ДРАКОН ПОВЕРЖЕН', RENDER_W / 2, 80, { align: 'center', size: 18, color: '#f0ece0' });
-    const s = g.stats;
-    const rows = [
-      ['убийств', s.kills],
-      ['боссов', s.bossesKilled],
-      ['предметов', s.itemsTaken],
-      ['время', `${Math.floor(s.time / 60)}:${String(Math.floor(s.time % 60)).padStart(2, '0')}`],
-    ];
-    rows.forEach((r, i) => {
-      this.text(r[0], RENDER_W / 2 - 70, 112 + i * 13, { size: 8, color: '#b8c8c0' });
-      this.text(String(r[1]), RENDER_W / 2 + 70, 112 + i * 13, { size: 8, color: '#f0ece0', align: 'right' });
-    });
-    this.text('ENTER — новый спуск', RENDER_W / 2, RENDER_H - 20, { align: 'center', size: 9, color: '#d8c88a' });
+    this.text('ДРАКОН ПОВЕРЖЕН', RENDER_W / 2, 30, { align: 'center', size: 16, color: '#f0ece0' });
+    this.paintRunStats('#b8c8c0', '#f0ece0');
   }
 }

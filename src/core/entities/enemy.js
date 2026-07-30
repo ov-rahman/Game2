@@ -4,7 +4,7 @@
  */
 import { getEnemy } from '../../data/enemies.js';
 import { creatureArt } from '../../data/creature-art.js';
-import { getBehavior } from '../ai/behaviors.js';
+import { getBehavior, chaseDecoy } from '../ai/behaviors.js';
 import { C } from '../constants.js';
 import { cellAtWorld } from '../world/collision.js';
 import { groundAt } from '../world/terrain.js';
@@ -113,6 +113,7 @@ export function createEnemy(id, x, z, opts = {}) {
       marks: null,
       markT: 0,
       revealed: false,
+      decoy: null,
     },
 
     fromSpawn: !!opts.fromSpawn,
@@ -152,15 +153,19 @@ export function updateStatus(game, e, dt) {
     }
   }
 
-  // Standing in lava hurts monsters too, unless they live in it.
+  // Standing in the floor's hazard hurts monsters too, unless they live in it.
   if (!e.flying && !e.lavaImmune) {
     const cell = cellAtWorld(game.dungeon.cells, e.x, e.z);
     if (cell === C.HAZARD) {
-      e.hazardAccum = (e.hazardAccum || 0) + dt * 4;
+      const dps = (game.floorDef.hazard && game.floorDef.hazard.enemyDps) || 8;
+      e.hazardAccum = (e.hazardAccum || 0) + dt * dps;
       if (e.hazardAccum >= 1) {
-        e.hazardAccum = 0;
-        game.damageEnemy(e, 3, { source: 'hazard', silent: true, trueDamage: true });
+        const n = Math.floor(e.hazardAccum);
+        e.hazardAccum -= n;
+        game.damageEnemy(e, n, { source: 'hazard', silent: true, trueDamage: true });
       }
+    } else {
+      e.hazardAccum = 0;
     }
   }
 }
@@ -182,7 +187,7 @@ export function updateEnemy(game, e, dt) {
   const slowMul = e.slow > 0 ? 0.5 : 1;
   const backup = e.speed;
   e.speed *= slowMul;
-  e.behavior(game, e, dt);
+  if (!e.ai.decoy || !chaseDecoy(game, e, dt)) e.behavior(game, e, dt);
   e.speed = backup;
 
   // Flyers hover; walkers hug the floor. Both are measured from the terrain,
