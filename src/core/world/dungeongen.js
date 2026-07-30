@@ -158,6 +158,10 @@ export function generateDungeon(rng, floorDef) {
   for (const r of rooms) {
     if (r.kind === ROOM_KIND.START || r.kind === ROOM_KIND.SHOP) continue;
 
+    // Keep the ring just inside the walls clear: it guarantees every doorway
+    // opens onto walkable ground and stops lava from sitting on a threshold.
+    const inner = (x, y) => x > r.x && y > r.y && x < r.x + r.w - 1 && y < r.y + r.h - 1;
+
     // Hazard pools: blobs rather than scattered cells, so they read as terrain.
     const pools = Math.round(floorDef.hazardChance * 7);
     for (let p = 0; p < pools; p++) {
@@ -166,7 +170,7 @@ export function generateDungeon(rng, floorDef) {
       const rad = rng.int(1, 2);
       for (let y = py - rad; y <= py + rad; y++) {
         for (let x = px - rad; x <= px + rad; x++) {
-          if (!inside(x, y)) continue;
+          if (!inside(x, y) || !inner(x, y)) continue;
           if (cells[idx(x, y)] !== C.FLOOR) continue;
           if (Math.abs(x - px) + Math.abs(y - py) > rad) continue;
           cells[idx(x, y)] = floorDef.pits ? (rng.chance(0.35) ? C.PIT : C.HAZARD) : C.HAZARD;
@@ -179,6 +183,7 @@ export function generateDungeon(rng, floorDef) {
     for (let b = 0; b < blocks; b++) {
       const bx = rng.int(r.x + 1, r.x + r.w - 2);
       const by = rng.int(r.y + 1, r.y + r.h - 2);
+      if (!inner(bx, by)) continue;
       if (cells[idx(bx, by)] !== C.FLOOR) continue;
       cells[idx(bx, by)] = C.RUBBLE;
     }
@@ -192,6 +197,33 @@ export function generateDungeon(rng, floorDef) {
       }
     }
   }
+
+  // ---- stairs ----------------------------------------------------------
+  // Placed in the boss room, carved into the grid so the staircase is actually
+  // visible in the world instead of being an invisible trigger volume.
+  const stairsRoom = bossRoom || rooms[rooms.length - 1];
+  const sgx = stairsRoom.cx;
+  const sgy = stairsRoom.cy + Math.min(2, Math.max(0, (stairsRoom.h >> 1) - 1));
+  for (let y = sgy - 1; y <= sgy + 1; y++) {
+    for (let x = sgx - 1; x <= sgx + 1; x++) {
+      if (inside(x, y)) cells[idx(x, y)] = C.FLOOR;
+    }
+  }
+  cells[idx(sgx, sgy)] = C.STAIRS;
+
+  const stairs = {
+    gx: sgx,
+    gy: sgy,
+    x: (sgx + 0.5) * CELL,
+    z: (sgy + 0.5) * CELL,
+    active: false,
+  };
+
+  // ---- reachability ----------------------------------------------------
+  // Hazard pools are painted after the corridors are carved, so a bad roll can
+  // wall a room off behind a ring of pits. Rather than reroll the whole floor,
+  // repair it: every room centre and the stairs must be walkable from spawn.
+  const repairs = ensureReachable(cells, rooms, stairs);
 
   // ---- doorways --------------------------------------------------------
   // A floor cell on a room boundary with exactly two open neighbours across is
@@ -249,17 +281,6 @@ export function generateDungeon(rng, floorDef) {
     }
   }
 
-  // ---- stairs ----------------------------------------------------------
-  // Placed in the boss room but only usable once the boss is down.
-  const stairsRoom = bossRoom || rooms[rooms.length - 1];
-  const stairs = {
-    gx: stairsRoom.cx,
-    gy: stairsRoom.cy + Math.min(2, (stairsRoom.h >> 1) - 1),
-    x: (stairsRoom.cx + 0.5) * CELL,
-    z: (stairsRoom.cy + Math.min(2, (stairsRoom.h >> 1) - 1) + 0.5) * CELL,
-    active: false,
-  };
-
   const start = rooms[0].world();
 
   return {
@@ -270,10 +291,106 @@ export function generateDungeon(rng, floorDef) {
     lights,
     stairs,
     start,
+    repairs,
     bossRoom: bossRoom ? bossRoom.id : 0,
     width: GRID_W,
     height: GRID_H,
   };
+}
+
+/** Can a walking body stand on this cell? */
+function walkable(cell) {
+  return cell === C.FLOOR || cell === C.DOOR || cell === C.HAZARD || cell === C.STAIRS;
+}
+
+/** Flood fill of walkable cells from one grid position. */
+function floodFrom(cells, gx, gy) {
+  const seen = new Uint8Array(GRID_W * GRID_H);
+  if (!inside(gx, gy) || !walkable(cells[idx(gx, gy)])) return seen;
+  const q = [idx(gx, gy)];
+  seen[q[0]] = 1;
+  for (let head = 0; head < q.length; head++) {
+    const cur = q[head];
+    const cx = cur % GRID_W;
+    const cy = (cur / GRID_W) | 0;
+    for (let k = 0; k < 4; k++) {
+      const nx = cx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ny = cy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (!inside(nx, ny)) continue;
+      const ni = idx(nx, ny);
+      if (seen[ni] || !walkable(cells[ni])) continue;
+      seen[ni] = 1;
+      q.push(ni);
+    }
+  }
+  return seen;
+}
+
+/**
+ * Guarantee that every room centre and the stairs can be walked to from the
+ * spawn, clearing the pits or rubble in the way.
+ *
+ * The repair is a breadth-first search outwards from everything already
+ * reachable, allowed to step through pits and rubble; walking the parent chain
+ * back from a stranded room clears the shortest possible plug rather than
+ * bulldozing a straight line through the rock.
+ *
+ * @returns {{cells:number, rooms:number}} how much had to be repaired — the
+ *          smoke test watches both numbers.
+ */
+function ensureReachable(cells, rooms, stairs) {
+  const targets = rooms.map((r) => idx(r.cx, r.cy));
+  targets.push(idx(stairs.gx, stairs.gy));
+
+  const report = { cells: 0, rooms: 0 };
+
+  for (let pass = 0; pass < 12; pass++) {
+    const seen = floodFrom(cells, rooms[0].cx, rooms[0].cy);
+    const stranded = targets.filter((i) => !seen[i]);
+    if (!stranded.length) break;
+    if (pass === 0) report.rooms = stranded.length;
+
+    // Multi-source BFS from the reachable region through soft obstacles.
+    const parent = new Int32Array(GRID_W * GRID_H).fill(-1);
+    const visited = new Uint8Array(GRID_W * GRID_H);
+    const q = [];
+    for (let i = 0; i < seen.length; i++) {
+      if (!seen[i]) continue;
+      visited[i] = 1;
+      q.push(i);
+    }
+    const passable = pass < 6
+      ? (c) => c !== C.SOLID
+      : () => true; // last resort: allow punching through rock
+    for (let head = 0; head < q.length; head++) {
+      const cur = q[head];
+      const cx = cur % GRID_W;
+      const cy = (cur / GRID_W) | 0;
+      for (let k = 0; k < 4; k++) {
+        const nx = cx + (k === 0 ? 1 : k === 1 ? -1 : 0);
+        const ny = cy + (k === 2 ? 1 : k === 3 ? -1 : 0);
+        if (!inside(nx, ny)) continue;
+        const ni = idx(nx, ny);
+        if (visited[ni] || !passable(cells[ni])) continue;
+        visited[ni] = 1;
+        parent[ni] = cur;
+        q.push(ni);
+      }
+    }
+
+    let progress = false;
+    for (const target of stranded) {
+      if (!visited[target]) continue;
+      for (let i = target; i >= 0 && !seen[i]; i = parent[i]) {
+        if (walkable(cells[i])) continue;
+        cells[i] = C.FLOOR;
+        report.cells++;
+        progress = true;
+      }
+    }
+    if (!progress) break;
+  }
+  return report;
 }
 
 function inside(x, y) {
@@ -319,19 +436,30 @@ function carveCorridor(cells, rng, a, b, floorDef) {
 }
 
 function markDoorways(cells, room) {
+  // Only a *gap in the wall* is a threshold: an opening one cell wide, with
+  // rock on both sides across the passage. Marking the whole perimeter (which
+  // is what a naive sweep does) turns every wide corridor into door trim.
   const edges = [];
   for (let x = room.x; x < room.x + room.w; x++) {
-    edges.push([x, room.y - 1], [x, room.y + room.h]);
+    edges.push([x, room.y - 1, 'v'], [x, room.y + room.h, 'v']);
   }
   for (let y = room.y; y < room.y + room.h; y++) {
-    edges.push([room.x - 1, y], [room.x + room.w, y]);
+    edges.push([room.x - 1, y, 'h'], [room.x + room.w, y, 'h']);
   }
-  for (const [x, y] of edges) {
+  for (const [x, y, axis] of edges) {
     if (!inside(x, y)) continue;
     const i = idx(x, y);
     if (cells[i] !== C.FLOOR) continue;
+    const a = axis === 'v' ? cellOf(cells, x - 1, y) : cellOf(cells, x, y - 1);
+    const b = axis === 'v' ? cellOf(cells, x + 1, y) : cellOf(cells, x, y + 1);
+    if (a !== C.SOLID || b !== C.SOLID) continue;
     cells[i] = C.DOOR;
   }
+}
+
+function cellOf(cells, x, y) {
+  if (!inside(x, y)) return C.SOLID;
+  return cells[idx(x, y)];
 }
 
 /** Cell lookup that treats out-of-bounds as solid rock. */

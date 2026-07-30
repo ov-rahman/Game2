@@ -618,6 +618,19 @@ export class Game {
 
   updateDynamicLights() {
     this.dynamicLights.length = 0;
+    // The way down gets its own lamp, bright once it opens: at this point the
+    // player has to find one specific tile in a big dark room.
+    const st = this.dungeon.stairs;
+    this.dynamicLights.push({
+      x: st.x,
+      y: 1.1,
+      z: st.z,
+      r: 0.55, g: 1, b: 0.75,
+      radius: st.active ? 15 : 7,
+      intensity: st.active ? 2.2 : 0.7,
+      flicker: st.active ? 2.4 : 0,
+      phase: 0,
+    });
     for (const e of this.enemies) {
       if (e.alive && e.light && !e.dormant) this.dynamicLights.push(e.light);
     }
