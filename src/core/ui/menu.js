@@ -149,7 +149,7 @@ function buildScreens(game) {
         { kind: 'note', label: 'CTRL — присесть    F — фонарь' },
         { kind: 'note', label: 'E — взять/купить   Q — предмет' },
         { kind: 'note', label: 'TAB — карта        ESC — пауза' },
-        { kind: 'note', label: 'F11 — полный экран  ` — отладка' },
+        { kind: 'note', label: 'R — начать заново  F11 — полный экран' },
         { kind: 'note', label: '' },
         { kind: 'note', label: 'геймпад: стики — ход и обзор, RT — огонь,' },
         { kind: 'note', label: 'A — выбрать, B — назад, X — взять, Y — предмет' },

@@ -204,7 +204,16 @@ function shellInput(game, platform, input) {
       return;
     }
     if (input.pressed.map) game.showMap = !game.showMap;
-    if (input.pressed.restart) game.togglePause();
+    if (input.pressed.restart) {
+      // R is the roguelike reflex. It goes to the confirmation rather than
+      // straight to a new run: losing a good descent to a mistyped key is
+      // worse than one extra keypress.
+      game.togglePause();
+      game.menu.show('pause');
+      game.menu.push('confirmRestart');
+      platform.input.releaseLock();
+      return;
+    }
     platform.input.setLockWanted(true);
   }
 }
