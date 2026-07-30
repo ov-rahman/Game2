@@ -12,6 +12,12 @@ import { clamp, lerp, dist2d } from '../math3.js';
 
 const MAX_PITCH = Math.PI / 2 - 0.06;
 
+/** How long after the last shot the barrel starts to cool, in seconds. */
+const HEAT_DELAY = 0.4;
+
+/** Used when a floor definition does not tune its own hazard. */
+const DEFAULT_HAZARD = { damage: 1, interval: 0.7, slow: 0.7, enemyDps: 8 };
+
 export function createPlayer(x, z) {
   return {
     x,
@@ -29,6 +35,7 @@ export function createPlayer(x, z) {
     targetEye: PLAYER.eye,
 
     hp: 6,
+    bonusHp: 0,       // permanent health won from bosses
     shield: 0,
     invuln: 0,
     dead: false,
@@ -63,6 +70,9 @@ export function createPlayer(x, z) {
 
     recoil: 0,
     kickY: 0,
+    hazardAccum: 0,
+    hazardSlow: 1,
+    heatDelay: 0,
   };
 }
 
@@ -101,7 +111,8 @@ export function updatePlayer(game, p, dt, input) {
   p.sprinting = wantSprint && !wantCrouch;
 
   const baseSpeed = wantCrouch ? PLAYER.crouch : p.sprinting ? PLAYER.sprint : PLAYER.walk;
-  const speed = baseSpeed * st.moveSpeed;
+  // Hazard terrain drags: wading is the cost, the damage is the warning.
+  const speed = baseSpeed * st.moveSpeed * (p.hazardSlow == null ? 1 : p.hazardSlow);
 
   if (p.sprinting) {
     p.stamina -= dt * (p.flags.stamina ? 0.62 : 1);
@@ -147,14 +158,25 @@ export function updatePlayer(game, p, dt, input) {
     game.sfx('step', { x: p.x, y: p.y, z: p.z, gain: p.crouching ? 0.25 : 0.6 });
   }
 
-  // How loud the player currently is — the core of the stealth layer.
-  p.noise = p.crouching ? 0.35 : p.sprinting ? 1.55 : 1;
+  // How loud the player currently is — the core of the stealth layer. It has
+  // to follow what the player is *doing*: standing still used to be exactly as
+  // loud as walking, which meant holding your breath in the dark did nothing
+  // and the whole sneaking layer was decoration.
+  const gait = clamp(moveSpeedNow / PLAYER.walk, 0, 1.8);
+  const style = p.crouching ? 0.3 : p.sprinting ? 1.5 : 0.95;
+  p.noise = 0.12 + gait * style;
   if (p.shootCd > 0.02) p.noise = Math.max(p.noise, 1.9);
 
   // ---- weapon ----------------------------------------------------------
   if (p.shootCd > 0) p.shootCd -= dt;
-  const cooling = st.heatCooling * (p.overheated ? 1.35 : 1);
-  p.heat = Math.max(0, p.heat - cooling * dt);
+  // Heat only bleeds off once the trigger has been off for a moment. Without
+  // that pause, cooling always outran the heat a sustained burst could build
+  // and the weapon could never overheat at all.
+  if (p.heatDelay > 0) p.heatDelay -= dt;
+  else {
+    const cooling = st.heatCooling * (p.overheated ? 1.8 : 1);
+    p.heat = Math.max(0, p.heat - cooling * dt);
+  }
   if (p.overheated && p.heat <= 0.05) p.overheated = false;
   p.spread = lerp(p.spread, moving ? 0.35 : 0.12, Math.min(1, dt * 6)) + p.recoil * 0.5;
 
@@ -164,6 +186,7 @@ export function updatePlayer(game, p, dt, input) {
     fireVolley(game, p, dir.x, dir.y, dir.z);
     p.shootCd = 1 / st.fireRate;
     if (!p.timers.overload && !p.flags.noHeat) {
+      p.heatDelay = HEAT_DELAY;
       p.heat += st.heatPerShot;
       if (p.heat >= 1) {
         p.heat = 1;
@@ -202,16 +225,20 @@ export function updatePlayer(game, p, dt, input) {
 
   // ---- hazards ---------------------------------------------------------
   const cell = cellAtWorld(game.dungeon.cells, p.x, p.z);
+  const haz = game.floorDef.hazard || DEFAULT_HAZARD;
   if (cell === C.HAZARD && !p.flags.fireImmune) {
-    // Crossing two tiles of lava has to cost something without being lethal:
-    // one point every half second is a real decision, not an instant death.
+    // What the floor's hazard *is* differs — brambles hold you, lava kills
+    // you — so both the bite and the interval come from the floor. The first
+    // moment is free: clipping a corner of a pool must not cost health.
     p.hazardAccum = (p.hazardAccum || 0) + dt;
-    if (p.hazardAccum > 0.5) {
+    p.hazardSlow = haz.slow;
+    if (p.hazardAccum > haz.interval) {
       p.hazardAccum = 0;
-      game.damagePlayer(1, { source: 'hazard', ignoreInvuln: true });
+      game.damagePlayer(haz.damage, { source: 'hazard', ignoreInvuln: true });
     }
   } else {
     p.hazardAccum = 0;
+    p.hazardSlow = 1;
   }
 
   runHook(p, 'onUpdate', { game, player: p, dt });

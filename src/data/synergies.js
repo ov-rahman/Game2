@@ -6,8 +6,13 @@
  * *distinct* result: new behaviour, its own colour, its own name on the pause
  * screen.
  *
- * A synergy is active when every id in `requires` is owned. `apply(ctx)` runs on
- * the shots of each volley.
+ * A synergy is active when every id in `requires` is owned. It may define:
+ *   apply(ctx)    runs on the shots of each volley — ctx.shots
+ *   passive(ctx)  runs during stat recomputation — ctx.stats, ctx.flags
+ *
+ * Anything that grants a standing ability belongs in `passive`: `flags` is
+ * rebuilt from scratch on every recompute, so a flag written from `apply` only
+ * survives until the next time a timer expires or the player takes a hit.
  */
 
 export const SYNERGIES = [
@@ -96,7 +101,7 @@ export const SYNERGIES = [
     requires: ['gravityWell', 'detonator'],
     apply(ctx) {
       for (const s of ctx.shots) {
-        s.gravity = 1;
+        s.gravityPull = 1;
         s.explosive = Math.max(1, s.explosive);
         s.blackhole = true;
         s.r = 0.6; s.g = 0.4; s.b = 1;
@@ -120,8 +125,8 @@ export const SYNERGIES = [
     name: 'Двойная орбита',
     desc: 'Два спутника + эхо: спутники бьют вдвое чаще.',
     requires: ['orbitShard', 'twinShard', 'echoChamber'],
-    apply(ctx) {
-      ctx.player.flags.fastOrbit = 1;
+    passive(ctx) {
+      ctx.flags.fastOrbit = 1;
     },
   },
   {
@@ -129,8 +134,8 @@ export const SYNERGIES = [
     name: 'Палач',
     desc: 'Метка + крит: помеченная цель всегда получает крит.',
     requires: ['huntersMark', 'criticalEye'],
-    apply(ctx) {
-      ctx.player.flags.markCrit = 1;
+    passive(ctx) {
+      ctx.flags.markCrit = 1;
     },
   },
   {
@@ -138,8 +143,8 @@ export const SYNERGIES = [
     name: 'Холодный синтез',
     desc: 'Хладагент + разгон: оружие почти не греется.',
     requires: ['coolant', 'overclock'],
-    apply(ctx) {
-      ctx.player.flags.noHeat = 1;
+    passive(ctx) {
+      ctx.flags.noHeat = 1;
     },
   },
   {
@@ -147,8 +152,8 @@ export const SYNERGIES = [
     name: 'Прожектор',
     desc: 'Длинный луч + ночные глаза: фонарь слепит и жжёт врагов.',
     requires: ['longBeam', 'nightEyes'],
-    apply(ctx) {
-      ctx.player.flags.torchBurns = 1;
+    passive(ctx) {
+      ctx.flags.torchBurns = 1;
     },
   },
   {
@@ -156,8 +161,8 @@ export const SYNERGIES = [
     name: 'Неугасимый',
     desc: 'Свет + ячейка: спасение от смерти восстанавливается на новом этаже.',
     requires: ['lastLight', 'wardCell'],
-    apply(ctx) {
-      ctx.player.flags.reviveRefresh = 1;
+    passive(ctx) {
+      ctx.flags.reviveRefresh = 1;
     },
   },
   {

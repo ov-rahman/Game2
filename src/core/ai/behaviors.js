@@ -106,6 +106,32 @@ function wander(game, e, dt, speed) {
 }
 
 /**
+ * While a decoy is screaming, monsters go for it instead of the player. It is
+ * a direct walk rather than a nav-field path — the shared field only ever
+ * points at the player, and the decoy is thrown into open ground anyway.
+ *
+ * @returns {boolean} true if the monster is committed to the decoy this tick.
+ */
+export function chaseDecoy(game, e, dt) {
+  const d = e.ai.decoy;
+  if (!d || d.t <= 0) {
+    e.ai.decoy = null;
+    return false;
+  }
+  const dx = d.x - e.x;
+  const dz = d.z - e.z;
+  const dist = Math.hypot(dx, dz) || 1;
+  if (dist < 1.3) {
+    drive(game, e, dt, 0, 0, 0);
+    e.yaw = Math.atan2(dx, dz);
+  } else {
+    drive(game, e, dt, dx / dist, dz / dist, e.speed, 12);
+  }
+  separate(game, e, dt);
+  return true;
+}
+
+/**
  * Perception. Sight needs line of sight and a rough facing cone; noise is
  * omnidirectional but only carries when the player is actually being loud.
  */
